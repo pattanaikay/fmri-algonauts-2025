@@ -108,3 +108,9 @@ Project is currently in development with the following progress:
 ## Contributing
 
 This is a research project for the Algonauts 2025 Challenge. For collaboration inquiries, please contact the repository owner.
+
+## Citation
+
+Gifford AT, Bersch D, St-Laurent M, Pinsard B, Boyle J, Bellec L, Oliva A, Roig G, Cichy RM. 2025. The Algonauts Project 2025 Challenge: How the Human Brain Makes Sense of Multimodal Movies. arXiv preprint, arXiv:2501.00504. DOI: https://doi.org/10.48550/arXiv.2501.00504
+
+Boyle J, Pinsard B, Borghesani V, Paugam F, DuPre E, Bellec P. 2023. The Courtois NeuroMod project: quality assessment of the initial data release (2020). 2023 Conference on Cognitive Computational Neuroscience.

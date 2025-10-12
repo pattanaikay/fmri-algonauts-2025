@@ -57,7 +57,40 @@ def make_run_name(cfg):
     t = int(time.time()%10000)
     return "_".join(parts) + f"_{t}"
 
-def run_grid_search(base_cfg, grid, run_single_experiment, seed=42):
+def log_experiment(cfg, description=""):
+    """
+    Log experiment configuration and details to a centralized log file.
+    
+    Args:
+        cfg (dict): Configuration dictionary
+        description (str): Description of the experiment
+    """
+    log_file = "experiment_tracking.jsonl"
+    
+    # Create log entry
+    log_entry = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "run_name": cfg["run_name"],
+        "description": description,
+        "key_params": {
+            "ff_dim": cfg.get("ff_dim"),
+            "proj_dim": cfg.get("proj_dim"),
+            "transformer_layers": cfg.get("transformer_layers"),
+            "nheads": cfg.get("nheads"),
+            "dropout": cfg.get("dropout"),
+            "modality_dropout_p": cfg.get("modality_dropout_p"),
+            "lr": cfg.get("lr"),
+            "batch_size": cfg.get("batch_size"),
+            "n_epochs": cfg.get("n_epochs")
+        },
+        "full_config": cfg
+    }
+    
+    # Append to log file
+    with open(log_file, "a") as f:
+        f.write(json.dumps(log_entry) + "\n")
+
+def run_grid_search(base_cfg, grid, run_single_experiment, seed=42, description=""):
     """
     Perform grid search over hyperparameters by running multiple experiments.
     
@@ -66,13 +99,14 @@ def run_grid_search(base_cfg, grid, run_single_experiment, seed=42):
         grid (dict): Dictionary mapping parameter names to lists of values to try
         run_single_experiment (callable): Function that runs one experiment with given config
         seed (int): Random seed for reproducibility
+        description (str): Description of this experiment series
         
     Example:
         grid = {
             "lr": [0.1, 0.01],
             "dropout": [0.1, 0.2]
         }
-        run_grid_search(base_cfg, grid, run_experiment)
+        run_grid_search(base_cfg, grid, run_experiment, description="Testing different learning rates")
     """
     keys, vals = zip(*grid.items())
     for v in itertools.product(*vals):
@@ -86,9 +120,15 @@ def run_grid_search(base_cfg, grid, run_single_experiment, seed=42):
         with open(os.path.join(cfg["log_dir"], "config.json"), "w") as f:
             json.dump(cfg, f, indent=2)
 
-        print("Starting run:", cfg["run_name"], cfg)
+        # Log experiment before running
+        log_experiment(cfg, description)
+        
+        logger.info(f"Starting run: {cfg['run_name']}")
+        logger.info(f"Configuration: {cfg}")
+        
         run_single_experiment(cfg, seed=seed)
-        print("Finished run:", cfg["run_name"])
+        
+        logger.info(f"Finished run: {cfg['run_name']}")
 
 # ---------- Model ----------
 class MultimodalTRIBE(nn.Module):
@@ -204,7 +244,7 @@ class MultimodalTRIBE(nn.Module):
             subject_ids (Tensor): Subject identifiers [B]
             
         Returns:
-            Tensor: Predicted brain activity [B, n_trs, n_parcels]
+            Tensor: Predicted brain activity [B, n_trs, n_parcels] 
         """
         x_txt, x_aud, x_vid = self.modality_dropout(x_txt, x_aud, x_vid)
         t_txt = self.txt_proj(x_txt)
@@ -425,7 +465,7 @@ base_cfg = {
   "n_samples":200, "fT":60, "D_text":300, "D_audio":64, "D_video":128,
   "n_trs":20, "n_parcels":50, "n_subjects":5,
   "batch_size":8, "n_epochs":3,
-  "proj_dim":128, "transformer_layers":2, "nheads":4, "ff_dim":512,
+  "proj_dim":128, "transformer_layers":2, "nheads":4, "ff_dim":1024,
   "dropout":0.1, "modality_dropout_p":0.2,
   "lr":1e-3, "warmup_steps":50
 }
@@ -434,7 +474,7 @@ grid = {
   "transformer_layers":[2,4],
   "modality_dropout_p":[0.0,0.2]
 }
-run_grid_search(base_cfg, grid, run_single_experiment)
+run_grid_search(base_cfg, grid, run_single_experiment, description="Testing with ff_dim 1024")
 
 logger.info("Training completed")
 writer.close()

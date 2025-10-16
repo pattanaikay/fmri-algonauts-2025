@@ -1,0 +1,203 @@
+Great — I’ll give you a concrete, runnable plan and the know-how you need to (1) run a set of focused experiments on your toy script, (2) log and compare them in TensorBoard, (3) estimate how long a full Algonauts training run will take (practical method + worked example), (4) list CUDA/GPU tips to speed real training, and (5) other practical hacks. I’ll call out where in your notebook the pieces live with a citation so you can jump straight to the lines to change. 
+
+---
+
+# 1) Experiment set (what to run on the toy dataset — ordered & why)
+
+Run these experiments in this order (cheap → costly). For each experiment I give *what to change*, *why*, and *what to watch in TensorBoard*.
+
+A. Stability checks (always first)
+
+* What: Overfit 10 samples (set `n_samples=10`, `n_epochs=200`, tiny `batch_size=2`).
+* Why: ensures model code, loss, optimizer and scheduler work; a real model should be able to overfit small data.
+* Watch: training loss should fall rapidly to near 0.
+
+B. Architecture (capacity) sweep
+
+* `proj_dim`: [128, 256, 512] (in `MultimodalTRIBE` constructor).
+* `transformer_layers`: [2, 4, 8].
+* `nheads`: [4, 8].
+* `ff_dim`: [2×, 4×] × `d_model`.
+* Why: find minimal capacity that gives good validation Pearson. More capacity → better fit (but slower / overfit risk).
+* Watch: validation Pearson and training time per step.
+
+C. Regularization sweep
+
+* `dropout`: [0.1, 0.3] (TransformerEncoderLayer `dropout`).
+* `modality_dropout_p`: [0.0, 0.2, 0.4] (in your model).
+* Why: prevents overfitting and tests robustness to missing modalities.
+* Watch: gap between training loss and validation Pearson.
+
+D. Training dynamics
+
+* Warmup steps: [50, 200] (scheduler).
+* Peak LR: [1e-3, 5e-4, 1e-4] (optimizer).
+* Optimizer: `AdamW` vs `Adam`.
+* Batch sizes: [8, 16, 32].
+* Why: LR & warmup shape convergence; batch size affects stability.
+* Watch: LR curve and step loss; exploding loss means lower LR/wider warmup.
+
+E. Data & ablations
+
+* Unimodal runs: video-only / audio-only / text-only (zero other inputs).
+* Window/context: `fT` values [30, 60, 120].
+* Subject conditioning: on vs off (`subj_emb` and `subj_bias` toggles).
+* Why: understand which modality contributes most and optimal temporal context.
+* Watch: relative val Pearson across unimodal vs multimodal.
+
+F. Final sanity / scale experiments
+
+* Freeze backbones (if you later fine-tune them) vs fine-tune.
+* Enable AMP + gradient accumulation to simulate larger batches if memory-limited.
+* Why: prepare for how you’ll run final large-scale job.
+
+---
+
+# 2) How to log & compare (TensorBoard + reproducible runs)
+
+You already have a runnable grid-run helper and TensorBoard logging in your script (see `run_grid_search()` and `run_single_experiment()` in your file). Use it like this:
+
+1. Create a `base_cfg` and `grid` (examples already included in the script). The runner will create a separate `runs/<run_name>/` dir for each experiment and write `config.json` for reproducibility. 
+
+2. What to log (per step / per epoch):
+
+   * `Loss/train_step` (already logged).
+   * `Loss/train_epoch` (already logged).
+   * `LR` (already logged).
+   * `Val/Pearson` (already logged from first-K samples).
+   * Add `Val/Pearson_per_parcel` (optional) or `GradNorm` if you want deeper diagnostics.
+
+3. Run TensorBoard:
+
+```bash
+tensorboard --logdir runs
+# open http://localhost:6006
+```
+
+4. Compare runs: pin the runs you want and compare `Val/Pearson` and `Loss/train_epoch`. Keep `config.json` from each run for exact hyperparams. The runner in your notebook already handles these steps. 
+
+---
+
+# 3) Estimate full Algonauts training time (method + worked example)
+
+## A — Key facts (from the challenge / TRIBE)
+
+* Algonauts 2025 used CNeuroMod data: ~65 hours training data per subject (≈55 hours Friends S1–6 + 4 movies), plus validation splits; total recordings ~80 hours per subject. Multiple sources confirm ~65 hours training and ~80 hours total per subject. ([arXiv][1])
+* TRIBE feature extraction: 24 hours on **128 × V100** GPUs; model training: **24 hours on a single V100** (their reported setup). That’s a useful empirical anchor. ([arXiv][2])
+
+## B — Practical scaling method you should use (measure and extrapolate)
+
+1. **Measure toy runtime numbers** (you must run this once):
+
+   * `avg_step_time_toy` = average wall-clock time per training step (one optimizer step) on your machine/GPU. You can measure by timing a loop inside `run_single_experiment` (use `time.time()` before/after inner loop; compute average).
+   * `toy_steps_per_epoch` = `ceil(n_samples_toy / batch_size_toy)`.
+
+2. **Estimate real dataset steps per epoch**:
+
+   * Choose a *window length* you will use in seconds. Example: your toy `fT=60` at 2Hz ⇒ window_seconds = 60 / 2 = 30s.
+   * Total training seconds ≈ `train_hours * 3600`. For Algonauts training set use 65 hours = 234,000 s.
+   * `real_windows = total_seconds / window_seconds`. (This assumes non-overlapping windows; adjust if you use overlap/stride.)
+   * `real_steps_per_epoch = ceil(real_windows / batch_size_real)`.
+
+3. **Scale per-step time for model size**: per-step time will increase if your final model has much larger `d_model` and more layers compared to toy.
+
+   * Let `d_toy` be toy `d_model` and `d_real` real `d_model`. Compute `size_ratio = d_real / d_toy`. Empirically per-step time tends to grow somewhere between **linear to quadratic** in `size_ratio` depending on which ops dominate (attention/FFN ~ O(d^2) internal ops, but memory bandwidth and batching moderate this). Use a conservative multiplier `model_time_factor` between `size_ratio` and `size_ratio**2`.
+   * Example: toy `d_model = 3*128 = 384`, TRIBE `d_model = 3*1024 = 3072` → `size_ratio`=8 → factor between 8 and 64. A safe midpoint ≈ 20–30.
+
+4. **Estimate total time**:
+
+```
+time_per_step_real ≈ avg_step_time_toy * model_time_factor * (GPU_perf_scale)
+total_steps = real_steps_per_epoch * epochs
+estimated_total_time = time_per_step_real * total_steps
+```
+
+`GPU_perf_scale` = ratio to account for difference between your GPU and benchmark GPU (if TRIBE used V100 and you have A100, you might be faster).
+
+## C — Worked numeric example (conservative)
+
+* Suppose you measured toy `avg_step_time_toy = 0.20 s` (common on CPU/weak GPU).
+* Toy: `n_samples=200`, `batch_size=8` → `toy_steps_per_epoch = 25`.
+* Real: 65 hours training, window_seconds=30 → `real_windows ≈ 234000 / 30 = 7800`.
+* If you plan `batch_size_real = 16` → `real_steps_per_epoch ≈ 7800 / 16 ≈ 488`.
+* `epochs` you plan: e.g., 10 → `total_steps ≈ 4880`.
+* `d_model` ratio = 3072/384 = 8 → pick `model_time_factor = 16` (mid conservative).
+* `time_per_step_real ≈ 0.20 * 16 = 3.2 s` per step.
+* `estimated_total_time ≈ 3.2 s * 4880 ≈ 15,616 s ≈ 4.3 hours` on *your GPU*.
+
+**BUT**: If you use full TRIBE hyperparams on a single V100 TRIBE reported ~24 hours. Differences come from: more epochs, different batch sizes, more windows (if overlapping), different I/O, using pretrained backbone fine-tuning, etc. Use the measurement method above and treat these numbers as *first-order* estimates. Also check the TRIBE reported empirical result: model training lasted ~24 hours on a single V100 (useful as a sanity anchor). ([arXiv][2])
+
+---
+
+# 4) CUDA / GPU practical tips (so your jobs run fast & stably)
+
+Short checklist — implement these before scale runs:
+
+A. Mixed precision (AMP)
+
+* Use `torch.cuda.amp.autocast()` + `GradScaler()` to reduce memory and increase throughput. Essential for transformers.
+
+B. Data loading
+
+* `num_workers > 0`, `pin_memory=True`, prefetch, and cache feature arrays as `np.memmap` for fast loading (TRIBE used memmaps).
+
+C. Batch size & gradient accumulation
+
+* Use the largest batch your GPU allows. If memory limited, use gradient accumulation to simulate bigger batches.
+
+D. Multi-GPU scaling
+
+* Use `DistributedDataParallel` (DDP) — scales almost linearly for data-parallel workloads. Avoid `DataParallel`.
+
+E. Mixed compute optimizations
+
+* If using Hugging Face / x-transformers backbones, use `torch.compile()` (PyTorch 2) or frameworks’ fused kernels.
+* Use NVLink / fast interconnect if multi-GPU.
+
+F. Memory & compute optimizations
+
+* Gradient checkpointing to trade compute for memory if models are deep.
+* Use fused optimizers (e.g., `bitsandbytes`/`fused AdamW`) when available.
+
+G. I/O & storage
+
+* Store cached features on an NVMe or fast network storage to avoid worker stalls. Load with memmaps to avoid memory spikes.
+
+H. Misc
+
+* Use `torch.backends.cudnn.benchmark = True` when input shapes are stable.
+
+---
+
+# 5) Other hacks & best practices for final model
+
+* **Freeze heavy backbones initially** (VideoMAE, Wav2Vec2, Llama) and only train readout + transformer; fine-tune later if needed. This saves GPU time. ([arXiv][2])
+* **Low-rank readout**: replace giant linear `d_model × n_parcels` with `d_model→r` and `r→n_parcels` (r ≈ 128–512) to reduce params and improve generalization.
+* **Attention pooling** instead of avg pooling — trainable pooling often finds task-relevant timepoints.
+* **Subject adaptation**: small per-subject adapter layers or per-subject affine readouts help generalization across people. TRIBE used subject conditioning. ([arXiv][2])
+* **Ensembling / SWA**: once you have stable checkpoints, Stochastic Weight Averaging / ensembling gives small but reliable boosts (TRIBE used ensemble approaches). ([arXiv][2])
+* **Resume & checkpoint frequently** (save last `n` checkpoints and best on val Pearson).
+* **Run multiple seeds** for any final claim; report mean ± std of val Pearson.
+
+---
+
+# Quick pointers to where to change things in your notebook
+
+* Model hyperparams: `MultimodalTRIBE(... proj_dim=..., transformer_layers=..., nheads=..., ff_dim=..., dropout=..., modality_dropout_p=...)`. 
+* LR schedule & warmup: `lr_lambda(... warmup_steps=..., total_steps=...)` inside `run_single_experiment` setup. 
+* Grid-run: `base_cfg` and `grid` near bottom of file — run `run_grid_search(base_cfg, grid, run_single_experiment)`. 
+* TensorBoard logging: already wired into `run_single_experiment` (writer per run). See `writer.add_scalar(...)` calls. 
+
+---
+
+# Final checklist & next actions I can do for you (pick any)
+
+* A. Generate a ready-to-run **experiment YAML** (grid) covering the top 6 knobs so you can spawn runs locally.
+* B. Add **automatic step-time measurement** to `run_single_experiment` and a final printout that estimates full Algonauts run time using the scaling method above.
+* C. Add **AMP + GradScaler + gradient clipping** into your toy run for immediate speed/memory benefit.
+* D. Produce a **W&B sweep YAML** for a focused Bayesian search (if you want parallel & automated search).
+
+Tell me which of A/B/C/D you want first and I’ll produce the exact code patch you can drop into `encodermodel-playground.py`.
+
+[1]: https://arxiv.org/pdf/2501.00504?utm_source=chatgpt.com "How the Human Brain Makes Sense of Multimodal Movies"
+[2]: https://arxiv.org/html/2507.22229v1?utm_source=chatgpt.com "TRIBE: TRImodal Brain Encoder for whole-brain fMRI ..."

@@ -179,9 +179,11 @@ class MultimodalTRIBE(nn.Module):
         self.pos_emb = nn.Parameter(torch.randn(1, max_seq_len, d_model) * 0.02)
         self.subj_emb = nn.Embedding(n_subjects, d_model)
 
+        # Use batch_first=True so inputs are expected as (batch, seq, feature)
+        # This also avoids a runtime warning and can improve inference performance.
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=nheads, dim_feedforward=ff_dim,
-            dropout=dropout, activation='gelu'
+            dropout=dropout, activation='gelu', batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_layers)
 
@@ -464,9 +466,9 @@ def run_single_experiment(cfg, seed=42):
 base_cfg = {
   "n_samples":200, "fT":60, "D_text":300, "D_audio":64, "D_video":128,
   "n_trs":20, "n_parcels":50, "n_subjects":5,
-  "batch_size":8, "n_epochs":3,
-  "proj_dim":128, "transformer_layers":2, "nheads":4, "ff_dim":1024,
-  "dropout":0.1, "modality_dropout_p":0.2,
+  "batch_size":8, "n_epochs":5,
+  "proj_dim":128, "transformer_layers":2, "nheads":8, "ff_dim":2048,
+  "dropout":0.3, "modality_dropout_p":0.2,
   "lr":1e-3, "warmup_steps":50
 }
 grid = {
@@ -474,7 +476,26 @@ grid = {
   "transformer_layers":[2,4],
   "modality_dropout_p":[0.0,0.2]
 }
-run_grid_search(base_cfg, grid, run_single_experiment, description="Testing with ff_dim 1024")
+if __name__ == '__main__':
+    # On Windows the 'spawn' start method is used by default. Protect the
+    # entry point of the program so child processes don't re-import and
+    # re-execute top-level code. Calling freeze_support() is recommended
+    # when freezing to an executable; it's safe to call regardless.
+    try:
+        # multiprocessing.freeze_support will be a no-op on non-frozen apps,
+        # but is useful on Windows for some setups.
+        import multiprocessing as _mp
+        _mp.freeze_support()
+    except Exception:
+        pass
 
-logger.info("Training completed")
-writer.close()
+    run_grid_search(base_cfg, grid, run_single_experiment, description="Testing with ff_dim:2048, n_epochs:5")
+
+    logger.info("Training completed")
+
+    # Close any global writers if present
+    try:
+        writer.close()
+    except Exception:
+        pass
+ 

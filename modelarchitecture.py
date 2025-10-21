@@ -1,0 +1,1 @@
+# In this file I will be attempting to create a model architecture for an encoding model (feature extaction and final model) based on the multiple research papers implementations done

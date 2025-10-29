@@ -15,3 +15,7 @@ transformers
 omegaconf
 tensorflow==2.10.0
 protobuf==3.19.6
+
+pillow
+dask[distributed]
+joblib

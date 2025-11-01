@@ -1,3 +1,14 @@
+"""
+This script implements a toy example of VGG16-based feature extraction followed by Ridge Regression
+for multi-output prediction tasks. It demonstrates different approaches to Ridge Regression:
+1. SVD-based implementation
+2. scikit-learn's RidgeCV
+3. Multi-output Ridge (MOR) and Batched Multi-output Ridge (B-MOR) using Dask
+
+The code uses VGG16's FC2 layer features as input and implements various Ridge Regression
+approaches to predict multiple target variables simultaneously.
+"""
+
 import numpy as np
 from sklearn.linear_model import RidgeCV, Ridge
 from sklearn.model_selection import KFold
@@ -10,8 +21,20 @@ from torch.utils.data import DataLoader, Subset
 from dask.distributed import Client, LocalCluster
 import math
 
-# Utility: Pearson mean across columns
 def pearson_mean_across_targets(Y_true, Y_pred):
+    """
+    Calculate the mean Pearson correlation coefficient across multiple target variables.
+    
+    Args:
+        Y_true (np.ndarray): Ground truth values, shape (n_samples, n_targets)
+        Y_pred (np.ndarray): Predicted values, shape (n_samples, n_targets)
+    
+    Returns:
+        float: Mean Pearson correlation across all targets
+    
+    Note:
+        Returns 0.0 for any target with zero standard deviation in either true or predicted values.
+    """
     corrs = []
     for j in range(Y_true.shape[1]):
         a = Y_true[:, j]
@@ -26,7 +49,22 @@ def pearson_mean_across_targets(Y_true, Y_pred):
 # 1) VGG16 feature extraction (FC2)
 
 def extract_vgg16_fc2_features(images_tensor, device='cpu', batch_size=32):
-    # Load pre-trained VGG16 and remove final classification layer to get FC2 outputs
+    """
+    Extract features from the FC2 (second fully connected) layer of a pre-trained VGG16 model.
+    
+    Args:
+        images_tensor (torch.Tensor): Input images tensor of shape (N, C, H, W)
+        device (str): Device to run the model on ('cpu' or 'cuda')
+        batch_size (int): Batch size for processing images
+    
+    Returns:
+        np.ndarray: Extracted FC2 features of shape (N, 4096)
+    
+    Note:
+        Uses a forward hook to capture the FC2 layer activations before the final
+        classification layer. The features are extracted using the pre-trained VGG16
+        model from torchvision.
+    """
     vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).to(device)
     vgg.eval()
 
@@ -50,8 +88,25 @@ def extract_vgg16_fc2_features(images_tensor, device='cpu', batch_size=32):
 
 # 2) Create toy dataset (use CIFAR10 small subset)
 def make_toy_XY(n_samples=200, n_targets=50, concat_frames=1):
+    """
+    Create a toy dataset using CIFAR10 images and synthetic target variables.
     
-    # Use torchvision CIFAR10 dataset as image source (224x224 required -> we upsample)
+    Args:
+        n_samples (int): Number of samples to generate
+        n_targets (int): Number of target variables to generate
+        concat_frames (int): Number of frames to concatenate (usually 1 for toy example)
+    
+    Returns:
+        tuple: (X_feats, Y) where:
+            - X_feats (np.ndarray): VGG16 FC2 features of shape (n_samples, 4096)
+            - Y (np.ndarray): Synthetic target variables of shape (n_samples, n_targets)
+    
+    Note:
+        1. Uses CIFAR10 images resized to 224x224 (VGG16 input size)
+        2. Extracts VGG16 FC2 features as input features
+        3. Creates synthetic targets using a linear model with noise:
+           Y = X @ B_true + noise
+    """
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),  # Convert PIL Image to tensor first
@@ -67,22 +122,43 @@ def make_toy_XY(n_samples=200, n_targets=50, concat_frames=1):
     # Turn into one big tensor
     images_all, _=next(iter(loader)) # shape(N, 3, 224, 224)
 
-    # If concat_frames>! we'd arrange sequences; for toy key concat_frames=1
+    # Extract VGG16 features
     X_feats = extract_vgg16_fc2_features(images_all)
-
-    # Optionally concatenate multiples frames 
     p = X_feats.shape[1]
 
     # Create synthetic linear targets: choose a random true B_true and make Y=X B_true + noise 
     rng = np.random.RandomState(0)
     B_true = rng.randn(p, n_targets) * 0.1
-    # Use X_feats.shape[0] to get number of samples for noise dimension
     Y = X_feats @ B_true + 0.05 * rng.randn(X_feats.shape[0], n_targets)
     return X_feats, Y
 
 # 3) SVD-based ridge (amortized over alphas)
 
 def ridge_svd_fit_predict(X, Y, alphas, cv=5):
+    """
+    Fit Ridge Regression using SVD decomposition and cross-validation.
+    
+    This implementation uses SVD for efficient computation of the Ridge solution
+    across multiple regularization parameters (alphas). It's more computationally
+    efficient than standard Ridge regression when trying multiple alpha values
+    because it computes the SVD only once.
+    
+    Args:
+        X (np.ndarray): Input features of shape (n_samples, n_features)
+        Y (np.ndarray): Target variables of shape (n_samples, n_targets)
+        alphas (list): List of alpha values to try for regularization
+        cv (int): Number of cross-validation folds
+    
+    Returns:
+        tuple: (best_alpha, B_final, Yhat) where:
+            - best_alpha (float): Best regularization parameter
+            - B_final (np.ndarray): Final coefficients matrix
+            - Yhat (np.ndarray): Predicted values
+    
+    Note:
+        Uses the formula B = V @ diag(s/(s^2 + alpha)) @ U.T @ Y
+        where U, s, V = svd(X)
+    """
     n, p = X.shape
     _, n_targets = Y.shape
 
@@ -132,7 +208,25 @@ def ridge_svd_fit_predict(X, Y, alphas, cv=5):
 # 4) sklearn RidgeCV baseline
 
 def sklearn_ridgecv_fit_predict(X, Y, alphas, cv=5):
-    # Initialize RidgeCV with alphas and cross-validation folds
+    """
+    Fit Ridge Regression using scikit-learn's RidgeCV implementation.
+    
+    This serves as a baseline implementation using scikit-learn's built-in
+    RidgeCV which performs efficient cross-validation to select the best
+    regularization parameter.
+    
+    Args:
+        X (np.ndarray): Input features of shape (n_samples, n_features)
+        Y (np.ndarray): Target variables of shape (n_samples, n_targets)
+        alphas (list): List of alpha values to try for regularization
+        cv (int): Number of cross-validation folds
+    
+    Returns:
+        tuple: (alpha, B, Yhat) where:
+            - alpha (float): Selected regularization parameter
+            - B (np.ndarray): Coefficient matrix (transposed to match convention)
+            - Yhat (np.ndarray): Predicted values
+    """
     model = RidgeCV(alphas=alphas, cv=cv)
     model.fit(X, Y)
     # Get coefficients (transpose to match our convention)
@@ -142,8 +236,31 @@ def sklearn_ridgecv_fit_predict(X, Y, alphas, cv=5):
 
 # 5) MOR vs B-MOR toy with local Dask
 def mor_ridge_dask(X, Y, alphas, cv=3, n_workers=2, threads_per_worker=1):
-    # Starting local cluster
-
+    """
+    Implement Multi-Output Ridge (MOR) and Batched Multi-Output Ridge (B-MOR) regression
+    using Dask for parallel computation.
+    
+    This function implements two strategies for parallel Ridge regression:
+    1. MOR: Fits a separate ridge model for each target variable
+    2. B-MOR: Splits targets into batches and fits one model per batch
+    
+    Args:
+        X (np.ndarray): Input features of shape (n_samples, n_features)
+        Y (np.ndarray): Target variables of shape (n_samples, n_targets)
+        alphas (list): List of alpha values to try for regularization
+        cv (int): Number of cross-validation folds
+        n_workers (int): Number of parallel workers for Dask
+        threads_per_worker (int): Number of threads per worker
+    
+    Returns:
+        dict: Dictionary containing results for both MOR and B-MOR:
+            - mor: {'alpha_list': list of alphas, 'B': coefficients, 'Yhat': predictions}
+            - bmor: {'alpha_list': list of alphas, 'B': coefficients, 'Yhat': predictions}
+    
+    Note:
+        - MOR: One model per target (maximum parallelism)
+        - B-MOR: One model per batch of targets (reduced communication overhead)
+    """
     cluster = LocalCluster(n_workers=n_workers, threads_per_worker=threads_per_worker, processes=True)
     client = Client(cluster)
 
@@ -153,13 +270,11 @@ def mor_ridge_dask(X, Y, alphas, cv=3, n_workers=2, threads_per_worker=1):
     n_samples, p = X.shape
     _, s = Y.shape
 
-    # MOR: submit one job per target (deplayed)
+    # MOR: submit one job per target (delayed)
     def fit_target(x, y_col, alphas_local, cv_local):
         # small helper to fit RidgeCV on vector y_col
         model = RidgeCV(alphas=alphas, cv=cv_local, store_cv_values=False)
         model.fit(x, y_col)
-
-        # sklearn RidgeCV with 1d y -> coef_ shape (n_features,)
         w = model.coef_.reshape(-1, 1)
         return float(model.alpha_), w
 
@@ -209,8 +324,21 @@ def mor_ridge_dask(X, Y, alphas, cv=3, n_workers=2, threads_per_worker=1):
     }
 
 # Main demo
-
 if __name__ == "__main__":
+    """
+    Main demonstration script that:
+    1. Creates a toy dataset using VGG16 features from CIFAR10 images
+    2. Compares three Ridge regression implementations:
+       - SVD-based Ridge regression
+       - scikit-learn's RidgeCV
+       - Parallel MOR and B-MOR using Dask
+    
+    The demo follows these steps:
+    1. Generate toy data with VGG16 FC2 features
+    2. Split into train/test sets (90/10)
+    3. Compare different Ridge regression implementations
+    4. Report performance metrics (Pearson correlation)
+    """
     print("Making toy data and extracting VGG16 features (this will download torchvision weights if needed)")
     X, Y = make_toy_XY(n_samples=200, n_targets=40)
     print("Shapes: X", X.shape, "Y", Y.shape)

@@ -128,7 +128,7 @@ def visualize_samples(loader):
     plt.show()
 
 print("Visualizing some training samples...")
-visualize_samples(train_loader)
+#visualize_samples(train_loader)
 
 # Defining the training process and evaluation functions
 

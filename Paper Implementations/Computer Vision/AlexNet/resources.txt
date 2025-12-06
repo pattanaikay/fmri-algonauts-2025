@@ -1,3 +1,5 @@
 https://www.youtube.com/watch?v=ZUc0Mib5DeI
 
 https://www.youtube.com/watch?v=UZDiGooFs54
+
+https://github.com/lloydaxeph/imagenet_cnn_implementation

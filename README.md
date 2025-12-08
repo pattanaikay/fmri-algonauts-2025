@@ -172,28 +172,15 @@ The transformer fusion component builds on TRIBE principles with custom modifica
 
 ### Key Hyperparameters
 
-| Parameter | Range | Default | Purpose | Notes |
-|-----------|-------|---------|---------|-------|
-| `proj_dim` | 128–512 | 128 | Modality projection dimension | Balance between capacity & efficiency |
-| `transformer_layers` | 2–8 | 2 | Depth of transformer encoder | Deeper = more fusion capacity |
-| `nheads` | 4–8 | 4 | Number of attention heads | TRIBE used 8-12; we use 4-8 for efficiency |
-| `ff_dim` | 1024–2048 | 1024 | Feed-forward network hidden dimension | Typically 2-4× d_model |
-| `dropout` | 0.1–0.3 | 0.1 | Transformer layer dropout | Higher values → stronger regularization |
-| `modality_dropout_p` | 0.0–0.4 | 0.2 | Probability of dropping each modality | Custom feature; critical for robustness |
-| `use_bmor` | True/False | False | Enable B-MOR front-end per modality | Optional preprocessing stage |
-| `lr` | 1e-4–1e-3 | 1e-3 | Learning rate | Linear warmup scheduling recommended |
-| `warmup_steps` | 50–200 | 50 | Linear warmup steps for scheduler | Stabilizes early training |
-
-### Custom Modifications from TRIBE
-
-| Modification | Original TRIBE | Our Version | Reason |
-|--------------|----------------|------------|--------|
-| **Modality Dropout** | Not included | Probabilistic per-modality dropout | Robustness & multimodal balance |
-| **Subject Conditioning** | Global features only | Modality-wise subject embeddings | Subject-specific representation learning |
-| **B-MOR Integration** | Direct pooling | Optional B-MOR preprocessing | Biologically-inspired efficiency |
-| **Temporal Pooling** | Max pooling | Adaptive average pooling | Preserves temporal information |
-| **Batch-First Format** | Sequence-first | Batch-first | GPU efficiency & modern PyTorch practices |
-| **Layer Norm Position** | Post-attention | Pre-projection + post-projection | Improved gradient flow & stability |
+| Parameter | Range | Default | Purpose |
+|-----------|-------|---------|---------|
+| `proj_dim` | 128–512 | 128 | Modality embedding dimension |
+| `transformer_layers` | 2–8 | 2 | Transformer encoder depth |
+| `nheads` | 4–8 | 4 | Attention heads |
+| `ff_dim` | 1024–2048 | 1024 | Feed-forward hidden dim |
+| `dropout` | 0.1–0.3 | 0.1 | Transformer dropout |
+| `modality_dropout_p` | 0.0–0.4 | 0.2 | Per-modality dropout probability |
+| `lr` | 1e-4–1e-3 | 1e-3 | Learning rate (warmup enabled) |
 
 ### Implementation Files
 

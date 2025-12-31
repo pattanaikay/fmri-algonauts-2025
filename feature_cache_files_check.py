@@ -1,7 +1,7 @@
 import numpy as np
 
 # Load the npz file
-npz_file = r"C:\Projects\fmri-algonauts-2025\fmri-algonauts-2025 data\feature_cache_smaller_set\s05e15a_features.npz"
+npz_file = r"C:\Projects\fmri-algonauts-2025\fmri-algonauts-2025 data\feature_cache_v2\bourne02_features.npz"
 data = np.load(npz_file, allow_pickle=True)
 
 # View all keys

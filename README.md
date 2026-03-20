@@ -116,26 +116,18 @@ The project implements a **custom multimodal transformer architecture inspired b
 
 The model follows a two-stage encoding pipeline:
 
-1. **Optional BMORStream Front-End** (per-modality preprocessing)
+1. **Batch Multi-Output Regression (B-MOR)** (distributed ridge regression)
 2. **Multimodal Transformer Fusion**
 3. **Per-Parcel Brain Response Prediction**
 
-### Stage 1: BMORStream (Optional Per-Modality Encoder)
+### Stage 1: Batch Multi-Output Regression (B-MOR)
 
-**B-MOR (Biologically-Motivated Object Recognition) Stream** can optionally preprocess each modality before transformer fusion:
+**Batch Multi-Output Regression (B-MOR)** is an optimized, distributed ridge regression strategy designed for large-scale fMRI datasets:
 
-- **Dual-Pathway Design**: Inspired by visual cortex (ventral/dorsal pathways)
-- **Separate Processing Branches**: 
-  - Spatial pathway: Captures "what" information
-  - Temporal pathway: Captures "where" information
-- **Benefits**:
-  - Reduces dimensionality before fusion
-  - Learns task-specific modality representations
-  - Enables independent optimization per modality
-  - Improves interpretability of learned features
-
-- **Implementation**: Applied selectively to visual/audio features with `use_bmor=True` flag
-- **Reference**: Adapted from neuroscience-inspired models for efficient multimodal learning
+- **Mathematical Optimization**: Uses Singular Value Decomposition (SVD) of the feature matrix $X$ to efficiently compute the ridge resolution matrix $M_\lambda$ once for all targets.
+- **Batching Strategy**: Partitions the brain targets (voxels/parcels) into independent batches that can be processed in parallel across multiple compute nodes.
+- **Complexity Reduction**: Reduces the computational cost from $O(p^3s + p^2ts)$ to $O(p^2tr + pr + pnsr)$, making it feasible to predict hundreds of thousands of brain targets.
+- **Reference**: Ahmadi, S. (2025) - "Scaling up Machine Learning Models for fMRI Brain Encoding" (Section 3.2.3.5).
 
 ### Stage 2: Multimodal Fusion with Transformer Encoder (TRIBE-Derived)
 
@@ -190,69 +182,32 @@ The transformer fusion component builds on TRIBE principles with custom modifica
 
 ## B-MOR + TRIBE Integration Pipeline
 
-The project explores a **two-stage encoding approach** combining B-MOR feature preprocessing with the TRIBE-derived transformer:
+The project implements a high-performance encoding pipeline combining the **TRIBE transformer** for multimodal fusion and **Batch Multi-Output Regression (B-MOR)** for scalable brain activity prediction:
 
-### Stage 1: B-MOR Stream Preprocessing (Optional)
+### Stage 1: Multimodal Transformer Fusion (TRIBE)
 
-**Purpose**: Learn efficient task-specific representations before multimodal fusion
+**Purpose**: Extract and fuse task-relevant latent features from multiple stimulus streams.
 
-- **Visual Features**:
-  - Dual pathways mimic ventral (object recognition) and dorsal (spatial awareness) streams
-  - Separate branches process appearance vs. motion information
-  - Learns compressed intermediate representations (pooled features)
+- **Modality Projections**: Standardizes visual, audio, and language features into a shared embedding space.
+- **Cross-Modal Attention**: Uses a Transformer encoder to model complex interactions between modalities across time.
+- **Modality Dropout**: Encourages robust representations that don't rely on a single input stream.
 
-- **Audio Features**:
-  - Similar dual-pathway approach for spectral features
-  - One branch captures pitch/tonal information
-  - Other branch captures temporal/rhythm information
+### Stage 2: Batch Multi-Output Regression (B-MOR)
 
-- **Language Features**:
-  - Optional B-MOR preprocessing for embedding sequences
-  - Preserves semantic structure while reducing dimensionality
+**Purpose**: Efficiently map latent features to thousands of brain parcels/voxels using optimized ridge regression.
 
-### Stage 2: Multimodal Transformer Fusion
+- **Implementation**: Based on Ahmadi (2025), Algorithm 1.
+- **Singular Value Decomposition (SVD)**: Decomposes the latent feature matrix $X$ once, allowing for near-instant computation of the ridge resolution matrix for any number of regularization ($\lambda$) values.
+- **Distributed Batching**: Brain targets are partitioned into batches and processed in parallel, significantly reducing memory overhead and training time compared to standard multi-output regression.
+- **Personalization**: Supports subject-specific readout weights to account for individual variations in brain organization.
 
-**Purpose**: Fuse preprocessed modality representations and predict brain responses
+### Training Workflow
 
-- Receives B-MOR pooled features (or raw features if `use_bmor=False`)
-- Applies modality-specific projections to align dimensions
-- Runs through transformer encoder for multi-head cross-modal attention
-- Outputs per-parcel brain activity predictions
-
-### Variants Explored
-
-1. **Direct Transformer** (baseline)
-   - Raw features → projections → transformer → readout
-   - Fastest inference, simplest implementation
-   - Works well with pre-reduced features (e.g., PCA)
-
-2. **B-MOR + Transformer** (staged approach)
-   - Raw features → B-MOR (dual pathways) → pooling → transformer → readout
-   - More parameters but better feature learning
-   - Enables independent modality optimization
-
-3. **Hybrid B-MOR Transformer** (advanced)
-   - B-MOR front-end runs in parallel for each modality
-   - Outputs concatenated and fed directly to transformer
-   - Efficient biologically-inspired fusion
-
-### Training Strategy for B-MOR + TRIBE
-
-1. **Stage A: Feature Encoder Pre-training** (optional)
-   - Train B-MOR streams on subset of data
-   - Freeze learned representations
-   - Use as fixed feature extractors
-
-2. **Stage B: End-to-End Training**
-   - Initialize with pre-trained B-MOR or random weights
-   - Train TRIBE transformer on full dataset
-   - Jointly optimize all layers
-   - Use TensorBoard to monitor per-modality gradients
-
-3. **Checkpoint Strategy**
-   - Save best B-MOR-only and TRIBE-only models
-   - Track best joint model
-   - Enable ensemble predictions if needed
+1. **Feature Extraction**: Run stimuli through pre-trained visual (Slow-R50), audio (MFCC), and language (BERT) models.
+2. **Transformer Pre-training**: Train the TRIBE encoder on a representative subset of data using a standard linear readout.
+3. **Latent Encoding**: Extract high-level "brain-aligned" features from the full dataset using the trained TRIBE encoder.
+4. **B-MOR Readout Fitting**: Fit the Batch Multi-Output Regression model to map TRIBE latents to the full set of brain targets.
+5. **Validation**: Evaluate performance using per-parcel Pearson correlation between predicted and real fMRI time series.
 
 ### Performance Implications
 

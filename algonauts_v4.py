@@ -2564,9 +2564,6 @@ for subject in sampled_subjects:
 print(f"\n✓ fMRI loading complete for {len(fmri_by_subject)} subject(s)")
 
 
-
-
-
 # In Step 5 or wherever you extract language features, modify to use ONLY pooler_output:
 
 print(f"\n[3] Loading cached features from {root_data_dir}/feature_cache_v2/...")
@@ -2614,11 +2611,6 @@ for npz_file in cached_npz_files:
         print(f"  ✗ {episode_name}: {e}")
 
 print(f"\n✓ Feature loading complete for {len(features_by_episode)} episode(s)")
-
-
-
-
-
 print(fmri_by_subject)
 
 
@@ -2777,10 +2769,6 @@ print(f"\n[4] Dataset Config:")
 print(f"  Total samples: {dataset_config['n_samples']}")
 print(f"  Feature dimension: {dataset_config['n_features']}")
 print(f"  Output parcels: {dataset_config['n_parcels']}")
-
-
-
-
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import IncrementalPCA
@@ -2995,14 +2983,7 @@ gc.collect()
 print(f"\n✓ Step 6 complete: Memory-efficient preprocessing with fixed dimensions!")
 
 
-
-
-
 import joblib
-
-
-
-
 
 # End of Step 6
 
@@ -3016,17 +2997,9 @@ print(f"✓ dataset_config saved to {checkpoint_path}")
 # Can recover later with:
 # dataset_config = joblib.load(checkpoint_path)
 
-
-
-
-
 # Can recover later with:
 checkpoint_path = os.path.join(root_data_dir, "preprocessing_pipeline", "dataset_config.pkl")
 dataset_config = joblib.load(checkpoint_path)
-
-
-
-
 
 import joblib
 import numpy as np
@@ -3046,9 +3019,6 @@ print(f"\nData Statistics:")
 print(f"  X mean: {dataset_config['X_final'].mean():.4f}")
 print(f"  X std: {dataset_config['X_final'].std():.4f}")
 print(f"  y mean: {dataset_config['y_final'].mean():.4f}")
-
-
-
 
 
 # Saving PCA for later use
@@ -3267,10 +3237,6 @@ step_timings['step_7_start'] = time.time()
 print("\n⏱️  STEP 7 START (Model Architecture Training)")
 print(f"   Started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(step_timings['step_7_start']))}")
 
-
-
-
-
 # ===== CUDA/PyTorch Environment Setup (add at Step 7 start) =====
 import torch
 import torch.nn as nn
@@ -3324,9 +3290,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 preallocate_gpu_memory(batch_size=4, max_seq_len=300, device=device)
 
 
-
-
-
 # Before Step 7 model creation - ADD THIS:
 print("\n[GPU RESET] Clearing GPU memory and resetting CUDA context...")
 
@@ -3345,9 +3308,6 @@ else:
     print("  ⚠ CUDA not available, using CPU")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-
-
 
 
 # ========================================================================
@@ -3460,10 +3420,6 @@ def train_with_amp(model, X_train_t, y_train_t, X_val_t, y_val_t,
             break
 
     return model, train_losses, val_losses
-
-
-
-
 
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import Ridge, RidgeCV
@@ -3634,9 +3590,6 @@ trained_models = {
 }
 
 
-
-
-
 # Before Step 8 model creation - ADD THIS:
 print("\n[GPU RESET] Clearing GPU memory and resetting CUDA context...")
 
@@ -3658,9 +3611,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 # **Step 8: Custom Model Architecture (TRIBE + B-MOR)**
-
-
-
 
 # ===== Modified train_tribe_encoder with AMP & Gradient Accumulation =====
 # filepath: c:\Projects\fmri-algonauts-2025\fmri-algonauts-2025 code\algonauts_v4.ipynb

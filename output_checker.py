@@ -30,4 +30,4 @@ def inspect_npy(file_path):
 
 
 # Example usage
-inspect_npy(r"C:\Projects\fmri-algonauts-2025\fmri-algonauts-2025 code\phase1_ridge_submission_updated\ridge_baseline_submission\predictions.npy")
+inspect_npy(r"C:\Projects\fmri-algonauts-2025\fmri-algonauts-2025 code\phase1_ridge_submission_ood\predictions.npy")

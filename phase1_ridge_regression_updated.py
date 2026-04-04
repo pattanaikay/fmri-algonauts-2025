@@ -40,7 +40,7 @@ FEATURE_CACHE_DIR = os.path.join(ROOT_DATA_DIR, "feature_cache_v2")
 DATASET_CONFIG_PATH = os.path.join(ROOT_DATA_DIR, "preprocessing_pipeline", "dataset_config.pkl")
 
 # Output Directories
-OUTPUT_DIR = "./phase1_ridge_submission_updated"
+OUTPUT_DIR = "./phase1_ridge_submission_ood"
 MODELS_DIR = os.path.join(OUTPUT_DIR, "trained_models")
 
 # Parameters
@@ -53,74 +53,162 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 # HELPER FUNCTIONS
 # =============================================================================
 
+# Exact sample counts required by the competition (Codabench targets)
+TARGET_COUNTS = {
+    'chaplin1': 432, 'chaplin2': 405, 
+    'mononoke1': 423, 'mononoke2': 426,
+    'passepartout1': 422, 'passepartout2': 436,
+    'planetearth1': 433, 'planetearth2': 418,
+    'pulpfiction1': 468, 'pulpfiction2': 378,
+    'wot1': 353, 'wot2': 324
+}
+
 def get_test_episodes():
-    """Identifies test episodes (S7) from the testdata folder."""
+    """Identifies ONLY the 12 required OOD test movies for the competition."""
     test_eps = []
+    movies_ood_path = os.path.join(TEST_DATA_DIR, "movies", "ood")
     
-    search_paths = [
-        TEST_DATA_DIR,
-        os.path.join(TEST_DATA_DIR, "transcripts", "s7"),
-        os.path.join(TEST_DATA_DIR, "friends", "s7")
-    ]
+    # Whitelist of episodes required by Codabench
+    required_episodes = set(TARGET_COUNTS.keys())
     
-    for path in search_paths:
-        if os.path.exists(path):
-            try:
-                files = os.listdir(path)
-                for f in files:
-                    if f.endswith(".tsv") and ("s7" in f or "s07" in f):
-                        ep = f.replace("friends_", "").replace(".tsv", "").replace("movie10_", "")
-                        test_eps.append(ep)
-            except Exception:
-                continue
+    if os.path.exists(movies_ood_path):
+        try:
+            genres = [f for f in os.listdir(movies_ood_path) 
+                     if os.path.isdir(os.path.join(movies_ood_path, f)) and f != ".datalad"]
+            
+            for genre in genres:
+                genre_path = os.path.join(movies_ood_path, genre)
+                # Find all task-*_video.mkv files
+                for f in os.listdir(genre_path):
+                    if f.startswith("task-") and f.endswith("_video.mkv"):
+                        # Extract episode name: task-chaplin1_video.mkv -> chaplin1
+                        ep = f.replace("task-", "").replace("_video.mkv", "")
+                        # STRICT FILTER: Only include if it is in the required list
+                        if ep in required_episodes:
+                            test_eps.append(ep)
+                            
+            print(f"  ✓ Found {len(test_eps)} required OOD episodes.")
+        except Exception as e:
+            print(f"  ⚠ Error reading movies/ood: {e}")
     
+    # Final fallback: Check feature cache if folder scan failed
     if not test_eps:
-        print("  ⚠ No episodes found in testdata folders, checking feature cache...")
+        print("  ⚠ No required OOD movies found in testdata, checking feature cache...")
         if os.path.exists(FEATURE_CACHE_DIR):
-            test_eps = [f.replace("_features.npz", "") for f in os.listdir(FEATURE_CACHE_DIR) if "s7" in f or "s07" in f]
+            for f in os.listdir(FEATURE_CACHE_DIR):
+                ep = None
+                if f.startswith("task-") and f.endswith("_video_features.npz"):
+                    ep = f.replace("task-", "").replace("_video_features.npz", "")
+                elif f.endswith("_features.npz"):
+                    ep = f.replace("_features.npz", "")
+                
+                if ep in required_episodes:
+                    test_eps.append(ep)
         
     return sorted(list(set(test_eps)))
 
 def load_and_preprocess_test_features(ep_name, pca_model, global_scaler):
-    """Loads S7 features, applies PCA, then applies the global training scaler."""
-    cache_path = os.path.join(FEATURE_CACHE_DIR, f"{ep_name}_features.npz")
-    if not os.path.exists(cache_path): return None
+    """Loads OOD movie features and pads them to match the target competition length."""
     
+    # 1. Determine Target Length (Priority: Hardcoded > Transcript > Cache)
+    target_samples = TARGET_COUNTS.get(ep_name)
+    
+    if target_samples is None:
+        transcripts_ood_path = os.path.join(TEST_DATA_DIR, "transcripts", "ood")
+        if os.path.exists(transcripts_ood_path):
+            for genre in os.listdir(transcripts_ood_path):
+                # Try multiple naming conventions for transcripts
+                possible_ts = [
+                    f"{ep_name}.tsv",
+                    f"task-{ep_name}_video.tsv",
+                    f"task-{ep_name}.tsv"
+                ]
+                for ts_name in possible_ts:
+                    transcript_path = os.path.join(transcripts_ood_path, genre, ts_name)
+                    if os.path.exists(transcript_path):
+                        df_temp = pd.read_csv(transcript_path, sep='\t')
+                        target_samples = len(df_temp)
+                        break
+                if target_samples: break
+
+    # 2. Load Features
+    possible_names = [
+        f"{ep_name}_features.npz",
+        f"task-{ep_name}_video_features.npz",
+        f"task-{ep_name}_features.npz",
+    ]
+    
+    cache_path = None
+    for name in possible_names:
+        test_path = os.path.join(FEATURE_CACHE_DIR, name)
+        if os.path.exists(test_path):
+            cache_path = test_path
+            break
+    
+    # Search for partial matches if needed
+    if not cache_path and os.path.exists(FEATURE_CACHE_DIR):
+        for f in os.listdir(FEATURE_CACHE_DIR):
+            if ep_name in f and "video_features.npz" in f:
+                cache_path = os.path.join(FEATURE_CACHE_DIR, f)
+                break
+            
+    if not cache_path:
+        print(f"    ⚠ Feature cache not found for {ep_name}")
+        return None
+
     with np.load(cache_path, allow_pickle=True) as data:
-        # Safely load modalities
-        def process_modality(name):
-            val = data.get(name)
-            if val is None: return None
-            if hasattr(val, 'dtype') and val.dtype == object and val.shape == ():
-                return val.item()
-            return val
+        # Load modalities
+        vis = data.get('visual')
+        aud = data.get('audio')
+        lang = data.get('language')
 
-        vis = process_modality('visual')
-        aud = process_modality('audio')
-        lang = process_modality('language')
+        # If language is a scalar object, extract it
+        if lang is not None and lang.dtype == object and lang.shape == ():
+            lang = lang.item()
 
+        # Check existing samples
         valid_mods = [m for m in [vis, aud, lang] if m is not None]
         if not valid_mods: return None
         
-        n_samples = min(m.shape[0] for m in valid_mods)
+        current_samples = min(m.shape[0] for m in valid_mods)
         
-        # Format and pad missing modalities
-        if vis is not None: vis = vis[:n_samples]
-        else: vis = np.zeros((n_samples, 2048), dtype=np.float32)
-            
-        if aud is not None: aud = aud[:n_samples]
-        else: aud = np.zeros((n_samples, 20), dtype=np.float32)
-            
-        if lang is not None:
-            if lang.ndim == 3: lang = lang.reshape(lang.shape[0], -1)
-            if lang.shape[1] > 768: lang = lang[:, :768]
-            elif lang.shape[1] < 768:
-                padding = np.zeros((lang.shape[0], 768 - lang.shape[1]), dtype=lang.dtype)
-                lang = np.concatenate([lang, padding], axis=1)
-            lang = lang[:n_samples]
-        else: lang = np.zeros((n_samples, 768), dtype=np.float32)
+        # Final length determination
+        if target_samples is None:
+            print(f"    ⚠ Target length unknown for {ep_name}, using current: {current_samples}")
+            target_samples = current_samples
+        else:
+            diff = target_samples - current_samples
+            if diff != 0:
+                status = "Padding" if diff > 0 else "Trimming"
+                print(f"    ⚠ {ep_name}: {status} {current_samples} -> {target_samples} samples")
+            else:
+                print(f"    ✓ {ep_name}: Length matches target {target_samples}")
 
-        # Scale and Transfrom
+        # 3. Helper to Pad or Trim
+        def fix_length(feat, dim):
+            if feat is None:
+                return np.zeros((target_samples, dim), dtype=np.float32)
+            
+            # Reshape language if needed
+            if dim == 768:
+                if feat.ndim == 3: feat = feat.reshape(feat.shape[0], -1)
+                if feat.shape[1] > 768: feat = feat[:, :768]
+                elif feat.shape[1] < 768:
+                    pad = np.zeros((feat.shape[0], 768 - feat.shape[1]), dtype=feat.dtype)
+                    feat = np.concatenate([feat, pad], axis=1)
+
+            if feat.shape[0] >= target_samples:
+                return feat[:target_samples]
+            else:
+                # Pad with the last frame
+                padding = np.tile(feat[-1:], (target_samples - feat.shape[0], 1))
+                return np.vstack([feat, padding])
+
+        vis = fix_length(vis, 2048)
+        aud = fix_length(aud, 20)
+        lang = fix_length(lang, 768)
+
+        # 4. Final Processing
         imputer = SimpleImputer(strategy='mean')
         vis = imputer.fit_transform(vis)
         aud = imputer.fit_transform(aud)
@@ -200,7 +288,7 @@ def main():
             joblib.dump(subject_models, model_save_path)
 
         if test_eps:
-            print(f"  Predicting Season 7...")
+            print(f"  Predicting OOD movies...")
             predictions_dict[subject] = {}
             subj_dir = os.path.join(OUTPUT_DIR, subject)
             os.makedirs(subj_dir, exist_ok=True)
@@ -224,10 +312,10 @@ def main():
         npy_submission_path = os.path.join(OUTPUT_DIR, "predictions.npy")
         np.save(npy_submission_path, predictions_dict)
         
-        zip_path = os.path.join(OUTPUT_DIR, "ridge_baseline_submission.zip")
+        zip_path = os.path.join(OUTPUT_DIR, "ridge_ood_submission.zip")
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.write(npy_submission_path, arcname='predictions.npy')
-        print(f"\n✓ Phase 1 Complete! Submission ZIP: {zip_path}")
+        print(f"\n✓ Phase 1 Complete! OOD Submission ZIP: {zip_path}")
 
 if __name__ == "__main__":
     main()

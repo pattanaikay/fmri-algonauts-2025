@@ -1,79 +1,171 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""
-Algonauts 2025 Challenge — Complete Training & Submission Workflow
+# **Algonauts 2025 Challenge — Complete Training & Submission Workflow**
+# 
+# This notebook integrates:
+# - Your MultimodalTRIBE_v2 model + BMORStream front-end
+# - Starter kit data loading and preprocessing
+# - Training on a **subset** of data for quick prototyping
+# - Per-parcel Pearson correlation validation (challenge metric)
+# - Submission formatting (nested dicts, .npy, .zip for Codabench)
+# 
+# **Steps Overview:**
+# 1. Load precomputed PCA-reduced features (visual, audio, language)
+# 2. Align features and fMRI responses
+# 3. Train MultimodalTRIBE_v2 on a subset (1-2 episodes) with your functions
+# 4. Validate and compute per-parcel correlations
+# 5. Format and prepare submission for Codabench
+# 6. Upload to Codabench for evaluation
 
-This script integrates:
-- MultimodalTRIBE model + Batch Multi-Output Regression (B-MOR) readout
-- Starter kit data loading and preprocessing
-- Training on a subset of data for quick prototyping
-- Per-parcel Pearson correlation validation (challenge metric)
-- Submission formatting (nested dicts, .npy, .zip for Codabench)
-"""
+# **Step 0: Checking environment setup and importing required libraries**
+
+# In[2]:
+
+
+# Importing the required libraries (the most fun part of all the code)
 
 import os
 import json
 import math
 import shutil
 import time
-import re
-import ast
-import string
-import zipfile
-import subprocess
-import logging
-import random
-import glob
 from pathlib import Path
-from datetime import datetime
-
-import cv2
-import h5py
-import librosa
-import nibabel as nib
+import glob
+import re
 import numpy as np
 import pandas as pd
+import h5py
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torch.cuda.amp import autocast, GradScaler
-from torch.nn.utils.rnn import pad_sequence
-
-from nilearn import plotting
-from nilearn.maskers import NiftiLabelsMasker
-from moviepy.editor import VideoFileClip
-from tqdm import tqdm
-from sklearn.linear_model import RidgeCV, Ridge, LinearRegression
+import librosa
+import ast
+import string
+import zipfile
+from tqdm.notebook import tqdm
+from sklearn.linear_model import RidgeCV, Ridge
+from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA, IncrementalPCA
 from sklearn.impute import SimpleImputer
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error
 from scipy.stats import pearsonr
 from joblib import Parallel, delayed
+import cv2
+import nibabel as nib
+from nilearn import plotting
+from nilearn.maskers import NiftiLabelsMasker
+import ipywidgets as widgets
+from ipywidgets import VBox, Dropdown, Button
+from IPython.display import Video, display, clear_output
+from moviepy.editor import VideoFileClip
 from transformers import BertTokenizer, BertModel
 from torchvision.transforms import Compose, Lambda, CenterCrop
 from torchvision.models.feature_extraction import create_feature_extractor
 from omegaconf import DictConfig, OmegaConf
 
-# Optional/IPython specific
-try:
-    import ipywidgets as widgets
-    from ipywidgets import VBox, Dropdown, Button
-    from IPython.display import Video, display, clear_output
-except ImportError:
-    widgets = None
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# In[3]:
+
+
+# Checking GPU availability and properties using PyTorch
+
+import torch
+
+# Check if CUDA is available
+cuda_available = torch.cuda.is_available()
+print(f"CUDA is available: {cuda_available}")
+
+if cuda_available:
+    # Get the number of CUDA devices
+    n_cuda_devices = torch.cuda.device_count()
+    print(f"Number of CUDA devices: {n_cuda_devices}")
+
+    # Print information for each CUDA device
+    for i in range(n_cuda_devices):
+        device_props = torch.cuda.get_device_properties(i)
+        print(f"\nCUDA Device {i}:")
+        print(f"  Name: {device_props.name}")
+        print(f"  Compute Capability: {device_props.major}.{device_props.minor}")
+        print(f"  Total Memory: {device_props.total_memory / 1024**3:.2f} GB")
+
+    # Get current device information
+    current_device = torch.cuda.current_device()
+    print(f"\nCurrent CUDA device: {current_device}")
+else:
+    print("No CUDA devices found. PyTorch will run on CPU only.")
+
+
+# In[4]:
+
+
+# Inspect GPU device properties with PyTorch and nvidia-smi output (if available)
+import subprocess
+import torch
+
+print('PyTorch CUDA available:', torch.cuda.is_available())
+if torch.cuda.is_available():
+    for i in range(torch.cuda.device_count()):
+        p = torch.cuda.get_device_properties(i)
+        print(f'--- GPU {i} ---')
+        print('Name:', p.name)
+        print('Compute Capability:', f'{p.major}.{p.minor}')
+        print('Total memory (GB):', p.total_memory/1024**3)
+
+# Attempt to call nvidia-smi for additional info
+try:
+    out = subprocess.check_output(['nvidia-smi', '--query-gpu=name,memory.total,driver_version,clocks.sm,temperature.gpu', '--format=csv,noheader,nounits'])
+    print('\nnvidia-smi output:')
+    print(out.decode('utf-8'))
+except Exception as e:
+    print('nvidia-smi not available or not found on PATH')
+
+# Quick note: compute capability alone does not give FLOPS without SM count and clock info.
+# For rough theoretical peak FLOPS you need: 2 * SMs * cores_per_SM * clock_GHz.
+# Use vendor docs or `nvidia-smi -q` / device properties to get SM and clock values.
+
+
+# In[5]:
+
+
+# Checking system configuration
+import sys
+import subprocess
+import torch
+
+def check_nvidia_gpu():
+    try:
+        # Try to get GPU info using nvidia-smi
+        output = subprocess.check_output(['nvidia-smi'], stderr=subprocess.STDOUT)
+        return output.decode('utf-8')
+    except:
+        return "No NVIDIA GPU detected or nvidia-smi not found"
+
+print("System Information:")
+print("-" * 50)
+print(f"Python Version: {sys.version.split()[0]}")
+print(f"PyTorch Version: {torch.__version__}")
+print(f"CUDA Available: {torch.cuda.is_available()}")
+print(f"CUDA Version: {torch.version.cuda}")
+print("\nGPU Information:")
+print("-" * 50)
+print(check_nvidia_gpu())
+
+
+# In[6]:
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ============================================================
-# DATA PRE-PROCESSING AND LOADING
-# ============================================================
+x = torch.rand(3, 3).to(device)  # tensor on GPU
+print(x.device)
+
+
+# **Step 2: Data Pre-Processing and Loading**
+
+# In[11]:
+
 
 # Functions to neccessiate alignment of .mkv movies with the .tsv transcripts
 
@@ -286,7 +378,7 @@ def interface_display_transcript_and_movie(movie_path, transcript_path):
     dropdown.observe(on_chunk_select, names='value')
 
 
-
+# In[12]:
 
 
 # HRF delay parameter
@@ -303,20 +395,20 @@ transcript_path = root_data_dir + "/algonauts_2025.competitors/stimuli/transcrip
 fmri_file_path = root_data_dir + "/algonauts_2025.competitors/fmri/"
 
 
-
+# In[13]:
 
 
 print(movie_path)
 
 
-
+# In[14]:
 
 
 atlas_path = root_data_dir + "/algonauts_2025.competitors/fmri/sub-01/atlas/sub-01_space-MNI152NLin2009cAsym_atlas-Schaefer18_parcel-1000Par7Net_desc-dseg_parcellation.nii.gz"
 dataset_name = "ses-003_task-s01e01a"
 
 
-
+# In[15]:
 
 
 # Align the .mkv movies and .tsv language transcripts
@@ -352,7 +444,7 @@ else:
 interface_display_transcript_and_movie(chosen_movie, chosen_transcript)
 
 
-
+# In[14]:
 
 
 # Brain visualization functions with fmri data mapping to brain regions
@@ -431,7 +523,7 @@ def plot_fmri_on_brain(chunk_index, fmri_file_path, atlas_path, dataset_name,
     plotting.show()
 
 
-# In[ ]:
+# In[17]:
 
 
 # Main interactive interface with brain visualization
@@ -501,7 +593,7 @@ def interface_display_transcript_movie_brain(movie_path, transcript_path,
     display(dropdown, output)
 
 
-# In[ ]:
+# In[18]:
 
 
 # Get the selected transcript row/chunk from the interface
@@ -513,7 +605,7 @@ interface_display_transcript_movie_brain(movie_path, transcript_path,
 
 # *Video Feature Extraction*
 
-
+# In[13]:
 
 
 def get_vision_model(device):
@@ -550,7 +642,7 @@ def get_vision_model(device):
 feature_extractor, model_layer = get_vision_model(device)
 
 
-# In[ ]:
+# In[15]:
 
 
 def extract_visual_features(episode_path, tr, feature_extractor, model_layer,
@@ -666,7 +758,7 @@ def extract_visual_features(episode_path, tr, feature_extractor, model_layer,
     return visual_features
 
 
-
+# In[16]:
 
 
 ### Define the transform pipeline for video frames ###
@@ -679,7 +771,7 @@ transform = Compose([
 ])
 
 
-# In[ ]:
+# In[22]:
 
 
 # As an exemple, extract visual features for season 1, episode 1 of Friends
@@ -718,7 +810,7 @@ except Exception as e:
     raise
 
 
-# In[ ]:
+# In[23]:
 
 
 # Print the features shape
@@ -731,7 +823,7 @@ print("\nVisual feature vectors for 5 movie chunks:\n")
 print(visual_features[20:25])
 
 
-
+# In[17]:
 
 
 # ============================================================================
@@ -878,7 +970,7 @@ def fit_ridge_per_parcel_parallel(X_mmap_path, y_mmap_path, X_val_path, y_val_pa
 
 # *Audio Feature Extraction*
 
-
+# In[18]:
 
 
 def extract_audio_features(episode_path, tr, sr, device, save_dir_temp,
@@ -960,7 +1052,7 @@ def extract_audio_features(episode_path, tr, sr, device, save_dir_temp,
     return audio_features
 
 
-# In[ ]:
+# In[26]:
 
 
 # As an example, extract audio features using season 1, episode 1 of Friends
@@ -981,7 +1073,7 @@ audio_features = extract_audio_features(episode_path, tr, sr, device,
     save_dir_temp, save_dir_features)
 
 
-# In[ ]:
+# In[27]:
 
 
 # Print the features shape
@@ -996,7 +1088,7 @@ print(audio_features[20:25])
 
 # *Text Feature Extraction*
 
-
+# In[19]:
 
 
 def get_language_model(device):
@@ -1037,7 +1129,7 @@ def get_language_model(device):
 model, tokenizer = get_language_model(device)
 
 
-# In[ ]:
+# In[20]:
 
 
 def extract_language_features(episode_path, model, tokenizer, num_used_tokens,
@@ -1170,7 +1262,7 @@ def extract_language_features(episode_path, model, tokenizer, num_used_tokens,
     return pooler_output, last_hidden_state
 
 
-# In[ ]:
+# In[30]:
 
 
 # As an exemple, extract language features using season 1, episode 1 of Friends
@@ -1189,7 +1281,7 @@ pooler_output, last_hidden_state = extract_language_features(episode_path,
     save_dir_features)
 
 
-# In[ ]:
+# In[31]:
 
 
 # Print the features shape
@@ -1211,7 +1303,7 @@ print("\nlast_hidden_state features for 5 movie chunks:\n")
 print(last_hidden_state[20:25])
 
 
-# In[ ]:
+# In[21]:
 
 
 # ============================================================================
@@ -1408,7 +1500,7 @@ def concatenate_and_standardize_pca_features(features_reduced, aligned_data):
 # - **Audio**: MFCC features (from cell 29-30)  
 # - **Language**: BERT embeddings (from cell 32-33)
 
-
+# In[8]:
 
 
 import os
@@ -1429,14 +1521,21 @@ print("="*70)
 
 # Discover available episodes
 print("\n[1] Scanning for available episodes...")
-stimuli_dir = os.path.join(algonauts_dir, "stimuli")
-transcript_dir = os.path.join(stimuli_dir, "transcripts", "friends")
+#stimuli_dir = os.path.join(algonauts_dir, "stimuli")
+
+# Checking for test data
+stimuli_dir = os.path.join(algonauts_dir, "testdata")
+transcript_dir = os.path.join(stimuli_dir, "transcripts")
+
+print("Transcript directory location: ", transcript_dir)
 
 # Find all available seasons and episodes
 available_episodes = []
 if os.path.exists(transcript_dir):
     for season_dir in sorted(os.listdir(transcript_dir)):
+        #print("Season directory:", season_dir)
         season_path = os.path.join(transcript_dir, season_dir)
+        #print("Season path:", season_path)
         if os.path.isdir(season_path):
             for transcript_file in sorted(os.listdir(season_path)):
                 if transcript_file.endswith('.tsv'):
@@ -1446,9 +1545,11 @@ if os.path.exists(transcript_dir):
                         'season': season_dir,
                         'transcript_path': os.path.join(season_path, transcript_file),
                     })
+                    #print("Available episodes:", available_episodes)
 
 print(f"✓ Found {len(available_episodes)} episodes")
-print(f"  Episodes: {[e['episode'] for e in available_episodes[:5]]} ... (showing first 5)")
+#print(f"  Episodes: {[e['episode'] for e in available_episodes[:5]]} ... (showing first 5)")
+print(f"  Episodes: {[e['episode'] for e in available_episodes]}")
 
 # Discover available subjects and their fMRI files
 print("\n[2] Scanning for available subjects...")
@@ -1476,9 +1577,10 @@ n_subjects = len(available_subjects)
 sample_size = n_episodes 
 n_samples_per_subject = n_subjects  # 100% of subjects
 
-# # 10% usage
-# sample_size = max(1, int(np.ceil(n_episodes * 0.1)))  # 10% of episodes
-# n_samples_per_subject = max(1, int(np.ceil(n_subjects * 0.1)))  # 10% of subjects
+#sampled_episodes = available_episodes
+# 10% usage
+sample_size = max(1, int(np.ceil(n_episodes)))  # 10% of episodes
+n_samples_per_subject = max(1, int(np.ceil(n_subjects)))  # 10% of subjects
 
 print(f"\n[3] 10% Sampling Strategy:")
 print(f"  Total episodes available: {n_episodes}")
@@ -1515,7 +1617,7 @@ print(f"\n✓ Data discovery complete. Ready for ingestion.")
 # 
 # All extracted features are cached to avoid redundant computation on reruns.
 
-
+# In[9]:
 
 
 def load_fmri_for_subject_episode(subject, episode, fmri_dir, root_data_dir):
@@ -1578,7 +1680,7 @@ def load_fmri_for_subject_episode(subject, episode, fmri_dir, root_data_dir):
         return None
 
 
-# In[ ]:
+# In[52]:
 
 
 print("\n" + "="*70)
@@ -1615,7 +1717,7 @@ else:
 print("\n✓ Episode verification complete")
 
 
-# In[ ]:
+# In[11]:
 
 
 print("\n" + "="*70)
@@ -1899,14 +2001,20 @@ def create_movie_episodes_list(root_data_dir):
         List of episode dicts with type='movie'
     """
     movies = []
-    movies_root = os.path.join(root_data_dir, "algonauts_2025.competitors", "stimuli", "movies", "movie10")
+    #movies_root = os.path.join(root_data_dir, "algonauts_2025.competitors", "stimuli", "movies", "movie10")
+
+    #Test data
+    movies_root = os.path.join(root_data_dir, "algonauts_2025.competitors", "testdata", "movies", "ood")
 
     if not os.path.exists(movies_root):
         print(f"  ⚠ Movies folder not found: {movies_root}")
         return movies
 
     # Expected movie genres
-    genres = ['bourne', 'figures', 'life', 'wolf']
+    #genres = ['bourne', 'figures', 'life', 'wolf']
+
+    # Dynamically find all subdirectories (genres) for test dataset
+    genres = [d for d in os.listdir(movies_root) if os.path.isdir(os.path.join(movies_root, d))]
 
     for genre in genres:
         genre_path = os.path.join(movies_root, genre)
@@ -1914,7 +2022,8 @@ def create_movie_episodes_list(root_data_dir):
             continue
 
         # Find all .mkv files in the genre folder
-        mkv_files = sorted(glob.glob(os.path.join(genre_path, f"{genre}*.mkv")))
+        #mkv_files = sorted(glob.glob(os.path.join(genre_path, f"{genre}*.mkv")))
+        mkv_files = sorted(glob.glob(os.path.join(genre_path, "*.mkv")))
 
         for mkv_file in mkv_files:
             filename = os.path.basename(mkv_file).replace('.mkv', '')
@@ -2250,7 +2359,657 @@ features_by_episode, checkpoint_obj = extract_features_with_checkpoints(
 print("\n✓ Step 5 complete: Friends episodes AND movies processed with robust checkpointing and caching")
 
 
+# In[26]:
 
+
+import os
+import json
+import time
+import glob
+from pathlib import Path
+from datetime import datetime
+
+print("\n" + "="*70)
+print("STEP 5: Data Ingestion with Checkpointing & Caching: In D Drive")
+print("="*70)
+
+# --------------------------
+# Setup directories and logging
+# --------------------------
+
+root_data_dir = r"D:\fmri-algonauts-2025-data"
+feature_cache_dir = os.path.join(root_data_dir, "feature_cache_v2")
+checkpoint_dir = os.path.join(root_data_dir, "extraction_checkpoints")
+log_dir = os.path.join(root_data_dir, "extraction_logs")
+
+for directory in [feature_cache_dir, checkpoint_dir, log_dir]:
+    os.makedirs(directory, exist_ok=True)
+
+# --------------------------
+# Checkpoint & Logging System
+# --------------------------
+
+class ExtractionCheckpoint:
+    """Manages checkpoints for feature extraction with resumability"""
+
+    def __init__(self, checkpoint_dir, log_dir):
+        self.checkpoint_dir = checkpoint_dir
+        self.log_dir = log_dir
+        self.checkpoint_file = os.path.join(checkpoint_dir, "extraction_progress.json")
+        self.log_file = os.path.join(log_dir, f"extraction_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        self.progress = self._load_checkpoint()
+
+    def _load_checkpoint(self):
+        """Load existing checkpoint or create new one"""
+        if os.path.exists(self.checkpoint_file):
+            with open(self.checkpoint_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {
+            'completed_episodes': {},
+            'failed_episodes': {},
+            'total_episodes_processed': 0,
+            'last_update': None,
+            'session_started': datetime.now().isoformat()
+        }
+
+    def save_checkpoint(self):
+        """Save current progress to checkpoint file"""
+        self.progress['last_update'] = datetime.now().isoformat()
+        # Write JSON using UTF-8 and preserve non-ASCII characters
+        with open(self.checkpoint_file, 'w', encoding='utf-8') as f:
+            json.dump(self.progress, f, indent=2, ensure_ascii=False)
+        self._log(f"✓ Checkpoint saved at {self.progress['last_update']}")
+
+    def mark_episode_complete(self, episode_name, modalities_extracted):
+        """Mark episode as successfully extracted"""
+        self.progress['completed_episodes'][episode_name] = {
+            'timestamp': datetime.now().isoformat(),
+            'modalities': modalities_extracted,
+            'status': 'success'
+        }
+        self.progress['total_episodes_processed'] += 1
+        self.save_checkpoint()
+        self._log(f"✓ {episode_name}: Extracted {modalities_extracted}")
+
+    def mark_episode_failed(self, episode_name, error_msg, attempted_modalities):
+        """Mark episode as failed with error details"""
+        self.progress['failed_episodes'][episode_name] = {
+            'timestamp': datetime.now().isoformat(),
+            'error': error_msg,
+            'attempted_modalities': attempted_modalities,
+            'status': 'failed'
+        }
+        self.save_checkpoint()
+        self._log(f"✗ {episode_name}: FAILED - {error_msg}")
+
+    def is_episode_completed(self, episode_name):
+        """Check if episode has been successfully processed"""
+        return episode_name in self.progress['completed_episodes']
+
+    def get_completed_modalities(self, episode_name):
+        """Get list of successfully extracted modalities for an episode"""
+        if episode_name in self.progress['completed_episodes']:
+            return self.progress['completed_episodes'][episode_name]['modalities']
+        return []
+
+    def get_summary(self):
+        """Get current extraction summary"""
+        return {
+            'total_processed': self.progress['total_episodes_processed'],
+            'total_completed': len(self.progress['completed_episodes']),
+            'total_failed': len(self.progress['failed_episodes']),
+            'completed_episodes': list(self.progress['completed_episodes'].keys()),
+            'failed_episodes': list(self.progress['failed_episodes'].keys())
+        }
+
+    def _log(self, message):
+        """Write message to log file"""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_message = f"[{timestamp}] {message}"
+        print(log_message)
+        # Ensure log directory exists and write using UTF-8 to avoid encoding errors
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+        with open(self.log_file, 'a', encoding='utf-8') as f:
+            f.write(log_message + '\n')
+
+
+# --------------------------
+# Feature Validation System
+# --------------------------
+
+class FeatureValidator:
+    """Validates extracted features for completeness and quality"""
+
+    @staticmethod
+    def validate_visual_features(features, episode_name, expected_shape_1=2048):
+        """Validate visual features"""
+        if features is None:
+            return False, "Visual features are None"
+        if not isinstance(features, np.ndarray):
+            return False, f"Visual features not numpy array: {type(features)}"
+        if features.shape[1] != expected_shape_1:
+            return False, f"Visual shape mismatch: {features.shape[1]} vs expected {expected_shape_1}"
+        if np.isnan(features).any():
+            nan_count = np.isnan(features).sum()
+            return False, f"Visual features contain {nan_count} NaN values"
+        if np.isinf(features).any():
+            inf_count = np.isinf(features).sum()
+            return False, f"Visual features contain {inf_count} Inf values"
+        return True, "✓ Visual features valid"
+
+    @staticmethod
+    def validate_audio_features(features, episode_name, expected_shape_1=20):
+        """Validate audio features"""
+        if features is None:
+            return False, "Audio features are None"
+        if not isinstance(features, np.ndarray):
+            return False, f"Audio features not numpy array: {type(features)}"
+        if features.shape[1] != expected_shape_1:
+            return False, f"Audio shape mismatch: {features.shape[1]} vs expected {expected_shape_1}"
+        if np.isnan(features).any():
+            nan_count = np.isnan(features).sum()
+            return False, f"Audio features contain {nan_count} NaN values"
+        if np.isinf(features).any():
+            inf_count = np.isinf(features).sum()
+            return False, f"Audio features contain {inf_count} Inf values"
+        return True, "✓ Audio features valid"
+
+    @staticmethod
+    def validate_language_features(features, episode_name, min_shape_1=100):
+        """Validate language features"""
+        if features is None:
+            return False, "Language features are None"
+        if not isinstance(features, np.ndarray):
+            return False, f"Language features not numpy array: {type(features)}"
+        if features.shape[1] < min_shape_1:
+            return False, f"Language shape too small: {features.shape[1]} < {min_shape_1}"
+        # Language features may have some NaN (will be imputed later)
+        nan_count = np.isnan(features).sum()
+        if nan_count > features.size * 0.5:  # Warn if >50% NaN
+            return False, f"Language features too sparse: {nan_count}/{features.size} NaN"
+        return True, f"✓ Language features valid (contains {nan_count} NaN values)"
+
+    @staticmethod
+    def validate_episode_alignment(visual, audio, language, episode_name, episode_type='friends'):
+        """Validate that all available modalities have same number of samples"""
+        shapes = [
+            (visual.shape[0] if visual is not None else None, 'visual'),
+            (audio.shape[0] if audio is not None else None, 'audio'),
+        ]
+
+        # Check language alignment if available (both Friends and movies)
+        if language is not None:
+            shapes.append((language.shape[0], 'language'))
+
+        n_samples = [s[0] for s in shapes if s[0] is not None]
+        if len(set(n_samples)) > 1:
+            return False, f"Modality mismatch: {shapes}"
+
+        return True, f"✓ All modalities aligned: {n_samples[0]} samples"
+
+
+# --------------------------
+# Cache Scanning & Recovery
+# --------------------------
+
+def scan_existing_cache(cache_dir):
+    """Scan cache directory to find already-processed episodes"""
+    print(f"\n[CACHE SCAN] Scanning {cache_dir}...")
+
+    cached_episodes = {}
+    if not os.path.exists(cache_dir):
+        print("  No cache directory found. Starting fresh.")
+        return cached_episodes
+
+    npz_files = sorted(glob.glob(os.path.join(cache_dir, "*_features.npz")))
+    print(f"  Found {len(npz_files)} cached feature files")
+
+    for npz_file in npz_files:
+        episode_name = os.path.basename(npz_file).replace('_features.npz', '')
+        try:
+            cached = np.load(npz_file, allow_pickle=True)
+            modalities = []
+
+            # Check which modalities are present and valid
+            for modality in ['visual', 'audio', 'language']:
+                if modality in cached:
+                    feat = cached[modality]
+                    if feat.size > 0:  # Check if not empty
+                        modalities.append(modality)
+
+            if modalities:
+                cached_episodes[episode_name] = {
+                    'path': npz_file,
+                    'modalities': modalities,
+                    'file_size_mb': os.path.getsize(npz_file) / (1024**2)
+                }
+                print(f"  ✓ {episode_name}: {modalities} ({cached_episodes[episode_name]['file_size_mb']:.1f} MB)")
+        except Exception as e:
+            print(f"  ✗ {episode_name}: Failed to load cache - {e}")
+
+    return cached_episodes
+
+
+# --------------------------
+# Movie Episode Discovery
+# --------------------------
+
+# def create_movie_episodes_list(root_data_dir):
+#     """
+#     Scan movie10 folder and create episode dictionaries for all movies
+
+#     Returns
+#     -------
+#     list
+#         List of episode dicts with type='movie'
+#     """
+#     movies = []
+#     movies_root = os.path.join(root_data_dir, "algonauts_2025.competitors", "testdata", "movies", "ood")
+
+#     if not os.path.exists(movies_root):
+#         print(f"  ⚠ Movies folder not found: {movies_root}")
+#         return movies
+
+#     # Expected movie genres
+#     genres = ['chaplin', 'mononoke', 'passepartout', 'planetearth', 'pulpfiction', 'wot']
+
+#     for genre in genres:
+#         genre_path = os.path.join(movies_root, genre)
+#         if not os.path.exists(genre_path):
+#             continue
+
+#         # Find all .mkv files in the genre folder
+#         mkv_files = sorted(glob.glob(os.path.join(genre_path, f"{genre}*.mkv")))
+
+#         for mkv_file in mkv_files:
+#             filename = os.path.basename(mkv_file).replace('.mkv', '')
+#             movies.append({
+#                 'episode': filename,           # e.g., 'bourne01'
+#                 'genre': genre,                # 'bourne', 'figures', 'life', 'wolf'
+#                 'title': genre,                # Movie title
+#                 'type': 'movie',               # Content type marker
+#                 'duration': 1.49               # Standard duration for feature extraction (in minutes)
+#             })
+
+#     print(f"Found {len(movies)} movie files across {len([g for g in genres if os.path.exists(os.path.join(movies_root, g))])} genres")
+#     return movies
+
+def create_movie_episodes_list(root_data_dir):
+    """
+    Scan movie10 folder and create episode dictionaries for all movies
+
+    Returns
+    -------
+    list
+        List of episode dicts with type='movie'
+    """
+    movies = []
+    movies_root = os.path.join(root_data_dir, "algonauts_2025.competitors", "testdata", "movies", "ood")
+
+    if not os.path.exists(movies_root):
+        print(f"  ⚠ Movies folder not found: {movies_root}")
+        return movies
+
+    # Expected movie genres
+    genres = ['chaplin', 'mononoke', 'passepartout', 'planetearth', 'pulpfiction', 'wot']
+
+    for genre in genres:
+        genre_path = os.path.join(movies_root, genre)
+        if not os.path.exists(genre_path):
+            continue
+
+        print(genre_path)
+
+        # Find all .mkv files in the genre folder (e.g., task-chaplin_video.mkv)
+        mkv_files = sorted(glob.glob(os.path.join(genre_path, "task-*_video.mkv")))
+
+        for mkv_file in mkv_files:
+            filename = os.path.basename(mkv_file).replace('.mkv', '')
+            # Extract movie name from format: task-{movie}_video -> movie
+            movie_name = filename.replace('task-', '').replace('_video', '')
+            movies.append({
+                'episode': filename,           # e.g., 'task-chaplin_video'
+                'genre': genre,                # e.g., 'chaplin'
+                'title': movie_name,           # Movie title
+                'type': 'movie',               # Content type marker
+                'duration': 1.49               # Standard duration for feature extraction (in minutes)
+            })
+
+    print(f"Found {len(movies)} movie files across {len([g for g in genres if os.path.exists(os.path.join(movies_root, g))])} genres")
+    return movies
+
+
+# --------------------------
+# Main extraction function with checkpointing
+# --------------------------
+
+def extract_features_with_checkpoints(
+    sampled_episodes,
+    root_data_dir,
+    feature_cache_dir,
+    checkpoint_dir,
+    log_dir,
+    feature_extractor,
+    model_layer,
+    transform,
+    device,
+    model,
+    tokenizer,
+    sr=22050,
+    checkpoint_interval=5  # Save checkpoint every N episodes
+):
+    """
+    Extract features with checkpointing, caching, and validation
+    Supports both Friends episodes and movies
+
+    Parameters
+    ----------
+    sampled_episodes : list
+        List of episode info dicts (with 'type' field: 'friends' or 'movie')
+    checkpoint_interval : int
+        Save checkpoint after every N episodes
+    """
+
+    # Initialize checkpoint system
+    checkpoint = ExtractionCheckpoint(checkpoint_dir, log_dir)
+    validator = FeatureValidator()
+
+    # Scan existing cache
+    print("\n[1] CACHE RECOVERY")
+    cached_episodes = scan_existing_cache(feature_cache_dir)
+    print(f"\n  Summary: {len(cached_episodes)}/{len(sampled_episodes)} episodes already cached")
+
+    # Identify which episodes need processing
+    print("\n[2] IDENTIFYING REMAINING WORK")
+    episodes_to_process = []
+    episodes_already_done = []
+
+    for episode in sampled_episodes:
+        ep_name = episode['episode']
+
+        # Check if already completed in this checkpoint
+        if checkpoint.is_episode_completed(ep_name):
+            episodes_already_done.append(ep_name)
+            print(f"  ✓ {ep_name}: Already in checkpoint (completed in earlier session)")
+            continue
+
+        # Check if cached
+        if ep_name in cached_episodes:
+            cached_info = cached_episodes[ep_name]
+            # Verify cache integrity
+            try:
+                cached = np.load(cached_info['path'], allow_pickle=True)
+                all_valid = True
+                for modality in cached_info['modalities']:
+                    if modality == 'visual':
+                        valid, msg = validator.validate_visual_features(cached['visual'], ep_name)
+                    elif modality == 'audio':
+                        valid, msg = validator.validate_audio_features(cached['audio'], ep_name)
+                    elif modality == 'language':
+                        valid, msg = validator.validate_language_features(cached['language'], ep_name)
+
+                    if not valid:
+                        all_valid = False
+                        print(f"  ⚠ {ep_name}: Cache invalid for {modality} - {msg}")
+                        break
+
+                if all_valid:
+                    episodes_already_done.append(ep_name)
+                    checkpoint.mark_episode_complete(ep_name, cached_info['modalities'])
+                    print(f"  ✓ {ep_name}: Cache verified and marked complete")
+                    continue
+            except Exception as e:
+                print(f"  ✗ {ep_name}: Cache corrupted - {e}. Will re-extract.")
+
+        episodes_to_process.append(episode)
+
+    print(f"\n  Already processed: {len(episodes_already_done)}")
+    print(f"  Need to process: {len(episodes_to_process)}")
+    print(f"  Total: {len(sampled_episodes)}")
+
+    # Process remaining episodes
+    print("\n[3] FEATURE EXTRACTION")
+
+    algonauts_dir = os.path.join(root_data_dir, "algonauts_2025.competitors")
+    features_by_episode = {}
+
+    for idx, episode in enumerate(episodes_to_process, 1):
+        ep_name = episode['episode']
+        episode_type = episode.get('type', 'friends')  # Default to 'friends' for backward compatibility
+
+        print(f"\n  [{idx}/{len(episodes_to_process)}] Processing {ep_name} ({episode_type})...")
+
+        cache_file = os.path.join(feature_cache_dir, f"{ep_name}_features.npz")
+        extracted_modalities = []
+        features = {}
+
+        try:
+            # ===== VISUAL FEATURES =====
+            try:
+                print(f"    Extracting visual features...")
+
+                # Construct path based on episode type
+                if episode_type == 'friends':
+                    season = episode['season']
+
+                    # S7 is in testdata, others are in stimuli                    
+                    data_split = "testdata" if season == "s7" else "stimuli"
+                    episode_path = os.path.join(
+                        algonauts_dir, data_split, "movies", season, f"friends_{ep_name}.mkv"
+                    )
+                elif episode_type == 'movie':
+                    genre = episode['genre']
+
+                    # OOD movies are in 'ood' folder inside testdata
+                    data_split = "testdata"
+                    episode_path = os.path.join(
+                        algonauts_dir, data_split, "movies", "ood", genre, f"{ep_name}.mkv"
+                    )
+                else:
+                    raise ValueError(f"Unknown episode type: {episode_type}")
+
+                visual_feats = extract_visual_features(
+                    episode_path, 1.49, feature_extractor, model_layer,
+                    transform, device, "./temp_visual", feature_cache_dir
+                )
+
+                valid, msg = validator.validate_visual_features(visual_feats, ep_name)
+                if not valid:
+                    raise ValueError(f"Visual validation failed: {msg}")
+
+                features['visual'] = visual_feats
+                extracted_modalities.append('visual')
+                print(f"      ✓ Visual: {visual_feats.shape}")
+            except Exception as e:
+                print(f"      ✗ Visual extraction failed: {e}")
+                checkpoint._log(f"  {ep_name} visual error: {str(e)}")
+
+            # ===== AUDIO FEATURES =====
+            try:
+                print(f"    Extracting audio features...")
+
+                # Construct path based on episode type
+                if episode_type == 'friends':
+                    season = episode['season']
+                    data_split = "testdata" if season == "s7" else "stimuli"
+                    episode_path = os.path.join(
+                        algonauts_dir, data_split, "movies", season, f"friends_{ep_name}.mkv"
+                    )
+                elif episode_type == 'movie':
+                    genre = episode['genre']
+                    data_split = "testdata"
+                    episode_path = os.path.join(
+                        algonauts_dir, data_split, "movies", "ood", genre, f"{ep_name}.mkv"
+                    )
+                else:
+                    raise ValueError(f"Unknown episode type: {episode_type}")
+
+                audio_feats = extract_audio_features(
+                    episode_path, 1.49, sr, device, "./temp_audio", feature_cache_dir
+                )
+
+                valid, msg = validator.validate_audio_features(audio_feats, ep_name)
+                if not valid:
+                    raise ValueError(f"Audio validation failed: {msg}")
+
+                features['audio'] = audio_feats
+                extracted_modalities.append('audio')
+                print(f"      ✓ Audio: {audio_feats.shape}")
+            except Exception as e:
+                print(f"      ✗ Audio extraction failed: {e}")
+                checkpoint._log(f"  {ep_name} audio error: {str(e)}")
+
+            # ===== LANGUAGE FEATURES =====
+            # Extract for both Friends episodes and movies
+            try:
+                print(f"    Extracting language features...")
+
+                # Construct transcript path based on episode type
+                if episode_type == 'friends':
+                    season = episode['season']
+                    data_split = "testdata" if season == "s7" else "stimuli"
+                    transcript_path = os.path.join(
+                        algonauts_dir, data_split, "transcripts", season, f"friends_{ep_name}.tsv"
+                    )
+                elif episode_type == 'movie':
+                    genre = episode['genre']
+                    data_split = "testdata"
+                    transcript_path = os.path.join(
+                        algonauts_dir, data_split, "transcripts", "ood", genre, f"{ep_name}.tsv"
+                    )
+                else:
+                    raise ValueError(f"Unknown episode type: {episode_type}")
+
+                pooler_output, last_hidden_state = extract_language_features(
+                    transcript_path, model, tokenizer, 510, 10, device, feature_cache_dir
+                )
+                language_feats = np.concatenate(
+                    [pooler_output, last_hidden_state.reshape(last_hidden_state.shape[0], -1)],
+                    axis=1
+                )
+
+                valid, msg = validator.validate_language_features(language_feats, ep_name)
+                if not valid:
+                    raise ValueError(f"Language validation failed: {msg}")
+
+                features['language'] = language_feats
+                extracted_modalities.append('language')
+                print(f"      ✓ Language: {language_feats.shape}")
+            except Exception as e:
+                print(f"      ✗ Language extraction failed: {e}")
+                checkpoint._log(f"  {ep_name} language error: {str(e)}")
+
+            # ===== ALIGNMENT VALIDATION =====
+            if len(extracted_modalities) >= 2:
+                valid, msg = validator.validate_episode_alignment(
+                    features.get('visual'), features.get('audio'),
+                    features.get('language'), ep_name, episode_type
+                )
+                if valid:
+                    print(f"    {msg}")
+                else:
+                    print(f"    ⚠ Alignment issue: {msg}")
+
+            # ===== SAVE CACHE =====
+            if extracted_modalities:
+                np.savez(
+                    cache_file,
+                    visual=features.get('visual'),
+                    audio=features.get('audio'),
+                    language=features.get('language')
+                )
+                print(f"    Cached to {cache_file}")
+                checkpoint.mark_episode_complete(ep_name, extracted_modalities)
+                features_by_episode[ep_name] = features
+            else:
+                checkpoint.mark_episode_failed(
+                    ep_name, "No modalities successfully extracted", []
+                )
+                print(f"    ✗ {ep_name}: No valid features extracted")
+
+        except Exception as e:
+            checkpoint.mark_episode_failed(ep_name, str(e), extracted_modalities)
+            print(f"    ✗ {ep_name}: Extraction failed - {e}")
+
+        # Save checkpoint at intervals
+        if idx % checkpoint_interval == 0:
+            checkpoint.save_checkpoint()
+            summary = checkpoint.get_summary()
+            print(f"\n  [CHECKPOINT] Processed {summary['total_completed']}/{len(sampled_episodes)}")
+            print(f"    Completed: {summary['total_completed']}")
+            print(f"    Failed: {summary['total_failed']}")
+
+    # Final checkpoint
+    checkpoint.save_checkpoint()
+    summary = checkpoint.get_summary()
+
+    print(f"\n[4] EXTRACTION COMPLETE")
+    print(f"{'─'*70}")
+    print(f"  Total episodes processed: {summary['total_processed']}")
+    print(f"  Successfully extracted: {summary['total_completed']}")
+    print(f"  Failed extractions: {summary['total_failed']}")
+    print(f"  Checkpoint file: {checkpoint.checkpoint_file}")
+    print(f"  Log file: {checkpoint.log_file}")
+    print(f"{'─'*70}")
+
+    if summary['total_failed'] > 0:
+        print(f"\n  Failed episodes:")
+        for ep in summary['failed_episodes']:
+            print(f"    - {ep}")
+        print(f"\n  ⚠ Review log file for error details")
+
+    return features_by_episode, checkpoint
+
+
+# --------------------------
+# Create combined episode list (Friends + Movies)
+# --------------------------
+
+print("\n[DISCOVERING EPISODES]")
+print("  Scanning for Friends episodes and movies...")
+
+# Add type field to Friends episodes
+friends_with_type = [dict(ep, type='friends') for ep in sampled_episodes]
+
+# Discover movies
+movies = create_movie_episodes_list(root_data_dir)
+
+# Combine all episodes
+all_episodes = friends_with_type + movies
+
+print(f"\n  ✓ Friends episodes: {len(friends_with_type)}")
+print(f"  ✓ Movies: {len(movies)}")
+print(f"  ✓ Total episodes: {len(all_episodes)}")
+
+# --------------------------
+# Execute feature extraction
+# --------------------------
+
+print("\n[STARTING EXTRACTION]")
+print(f"Cache dir: {feature_cache_dir}")
+print(f"Checkpoint dir: {checkpoint_dir}")
+print(f"Log dir: {log_dir}")
+
+features_by_episode, checkpoint_obj = extract_features_with_checkpoints(
+    sampled_episodes=all_episodes,
+    root_data_dir=root_data_dir,
+    feature_cache_dir=feature_cache_dir,
+    checkpoint_dir=checkpoint_dir,
+    log_dir=log_dir,
+    feature_extractor=feature_extractor,
+    model_layer=model_layer,
+    transform=transform,
+    device=device,
+    model=model,
+    tokenizer=tokenizer,
+    sr=22050,
+    checkpoint_interval=5
+)
+
+print("\n✓ Step 5 complete: Friends episodes AND movies processed with robust checkpointing and caching")
+
+
+# In[1]:
 
 
 print("\n" + "="*70)
@@ -2453,39 +3212,7 @@ print(f"  Total (subject, episode) pairs: {sum(len(v) for v in fmri_by_subject.v
 
 # **Step 6: Preprocessing & Alignment (HRF Delay, Normalization, Concatenation)**
 
-# In[ ]:
-
-
-### STEP 5 TIMING SUMMARY ###
-# Record the end of Step 5
-
-step_timings['step_5_end'] = time.time()
-print("\n⏱️  STEP 5 END")
-print(f"   Completed at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(step_timings['step_5_end']))}")
-
-# Calculate Step 5 timing
-if step_timings['step_5_start'] and step_timings['step_5_end']:
-    step_5_elapsed = step_timings['step_5_end'] - step_timings['step_5_start']
-
-    # Extrapolate based on sampled episodes vs total episodes
-    extrapolated_step5 = (step_5_elapsed / len(sampled_episodes)) * len(available_episodes)
-
-    print(f"\n{'─'*70}")
-    print(f"STEP 5 TIMING SUMMARY")
-    print(f"{'─'*70}")
-    print(f"  Episodes processed:     {len(sampled_episodes)}/{len(available_episodes)}")
-    print(f"  Elapsed time (actual):  {format_time(step_5_elapsed)}")
-    print(f"  Time per episode:       {(step_5_elapsed/len(sampled_episodes)):.2f}s")
-    print(f"  Extrapolated (all):     {format_time(extrapolated_step5)}")
-    print(f"{'─'*70}")
-
-# Initialize timers for remaining steps
-step_timings['step_6_start'] = time.time()
-print("\n⏱️  STEP 6 START (Preprocessing & Alignment)")
-print(f"   Started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(step_timings['step_6_start']))}")
-
-
-
+# In[55]:
 
 
 # Step 5 current working cell
@@ -2564,6 +3291,9 @@ for subject in sampled_subjects:
 print(f"\n✓ fMRI loading complete for {len(fmri_by_subject)} subject(s)")
 
 
+# In[56]:
+
+
 # In Step 5 or wherever you extract language features, modify to use ONLY pooler_output:
 
 print(f"\n[3] Loading cached features from {root_data_dir}/feature_cache_v2/...")
@@ -2611,6 +3341,11 @@ for npz_file in cached_npz_files:
         print(f"  ✗ {episode_name}: {e}")
 
 print(f"\n✓ Feature loading complete for {len(features_by_episode)} episode(s)")
+
+
+# In[21]:
+
+
 print(fmri_by_subject)
 
 
@@ -2769,6 +3504,10 @@ print(f"\n[4] Dataset Config:")
 print(f"  Total samples: {dataset_config['n_samples']}")
 print(f"  Feature dimension: {dataset_config['n_features']}")
 print(f"  Output parcels: {dataset_config['n_parcels']}")
+
+
+# In[ ]:
+
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import IncrementalPCA
@@ -2983,7 +3722,14 @@ gc.collect()
 print(f"\n✓ Step 6 complete: Memory-efficient preprocessing with fixed dimensions!")
 
 
+# In[22]:
+
+
 import joblib
+
+
+# In[ ]:
+
 
 # End of Step 6
 
@@ -2997,9 +3743,17 @@ print(f"✓ dataset_config saved to {checkpoint_path}")
 # Can recover later with:
 # dataset_config = joblib.load(checkpoint_path)
 
+
+# In[23]:
+
+
 # Can recover later with:
 checkpoint_path = os.path.join(root_data_dir, "preprocessing_pipeline", "dataset_config.pkl")
 dataset_config = joblib.load(checkpoint_path)
+
+
+# In[24]:
+
 
 import joblib
 import numpy as np
@@ -3019,6 +3773,9 @@ print(f"\nData Statistics:")
 print(f"  X mean: {dataset_config['X_final'].mean():.4f}")
 print(f"  X std: {dataset_config['X_final'].std():.4f}")
 print(f"  y mean: {dataset_config['y_final'].mean():.4f}")
+
+
+# In[ ]:
 
 
 # Saving PCA for later use
@@ -3237,6 +3994,10 @@ step_timings['step_7_start'] = time.time()
 print("\n⏱️  STEP 7 START (Model Architecture Training)")
 print(f"   Started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(step_timings['step_7_start']))}")
 
+
+# In[ ]:
+
+
 # ===== CUDA/PyTorch Environment Setup (add at Step 7 start) =====
 import torch
 import torch.nn as nn
@@ -3290,6 +4051,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 preallocate_gpu_memory(batch_size=4, max_seq_len=300, device=device)
 
 
+# In[26]:
+
+
 # Before Step 7 model creation - ADD THIS:
 print("\n[GPU RESET] Clearing GPU memory and resetting CUDA context...")
 
@@ -3308,6 +4072,9 @@ else:
     print("  ⚠ CUDA not available, using CPU")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+# In[25]:
 
 
 # ========================================================================
@@ -3420,6 +4187,10 @@ def train_with_amp(model, X_train_t, y_train_t, X_val_t, y_val_t,
             break
 
     return model, train_losses, val_losses
+
+
+# In[ ]:
+
 
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import Ridge, RidgeCV
@@ -3590,6 +4361,9 @@ trained_models = {
 }
 
 
+# In[ ]:
+
+
 # Before Step 8 model creation - ADD THIS:
 print("\n[GPU RESET] Clearing GPU memory and resetting CUDA context...")
 
@@ -3612,215 +4386,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # **Step 8: Custom Model Architecture (TRIBE + B-MOR)**
 
-# ===== Modified train_tribe_encoder with AMP & Gradient Accumulation =====
-# filepath: c:\Projects\fmri-algonauts-2025\fmri-algonauts-2025 code\algonauts_v4.ipynb
-
-def train_tribe_encoder_optimized(
-    model: nn.Module,
-    train_loader: DataLoader,
-    val_loader: DataLoader,
-    device='cuda',
-    epochs=10,
-    lr=1e-4,
-    save_path='tribe_encoder_real.pth',
-    accumulation_steps=2,  # Gradient accumulation for 6GB VRAM
-    use_amp=True  # Mixed precision
-):
-    """
-    Train TRIBE encoder with GPU memory optimizations.
-
-    Parameters
-    ----------
-    accumulation_steps : int
-        Gradient accumulation steps (effective batch_size = batch_size * accumulation_steps)
-    use_amp : bool
-        Use Automatic Mixed Precision (AMP) for memory efficiency
-    """
-
-    model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
-
-    # Initialize AMP scaler if enabled
-    scaler = GradScaler() if use_amp else None
-
-    best_val = float('inf')
-    best_epoch = 0
-    patience = 5
-    patience_counter = 0
-
-    def _pool_to_ntr(y: torch.Tensor, n_trs: int):
-        """Pool targets to model temporal resolution"""
-        L = y.shape[1]
-        if L == n_trs:
-            return y
-        y_t = y.transpose(1, 2)
-        if L > n_trs:
-            y_p = torch.nn.functional.adaptive_avg_pool1d(y_t, n_trs)
-        else:
-            y_p = torch.nn.functional.interpolate(y_t, size=n_trs, mode='linear', align_corners=False)
-        return y_p.transpose(1, 2)
-
-    print(f"\n[TRAINING] Starting with:")
-    print(f"  Mixed Precision (AMP): {use_amp}")
-    print(f"  Gradient Accumulation: {accumulation_steps} steps")
-    print(f"  Effective LR: {lr}")
-    print(f"  Device: {device}")
-
-    for epoch in range(epochs):
-        model.train()
-        train_loss = 0.0
-        train_count = 0
-        accumulation_counter = 0
-
-        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train epoch {epoch+1}", leave=False)):
-            x_txt, x_aud, x_vid, subject_ids, y_small, _ = batch
-            x_txt = x_txt.to(device)
-            x_aud = x_aud.to(device)
-            x_vid = x_vid.to(device)
-            subject_ids = subject_ids.to(device)
-            y_small = y_small.to(device)
-
-            # ===== MIXED PRECISION FORWARD PASS =====
-            if use_amp:
-                with autocast(dtype=torch.float16):
-                    preds = model(x_txt, x_aud, x_vid, subject_ids)
-                    y_small_pooled = _pool_to_ntr(y_small, model.n_trs).to(preds.device)
-                    loss = criterion(preds, y_small_pooled)
-                    loss = loss / accumulation_steps  # Scale loss for accumulation
-
-                # ===== SCALED BACKWARD =====
-                scaler.scale(loss).backward()
-            else:
-                # Standard precision
-                preds = model(x_txt, x_aud, x_vid, subject_ids)
-                y_small_pooled = _pool_to_ntr(y_small, model.n_trs).to(preds.device)
-                loss = criterion(preds, y_small_pooled)
-                loss = loss / accumulation_steps
-                loss.backward()
-
-            accumulation_counter += 1
-            train_loss += loss.item() * accumulation_steps * x_txt.shape[0]
-            train_count += x_txt.shape[0]
-
-            # ===== GRADIENT ACCUMULATION STEP =====
-            if (batch_idx + 1) % accumulation_steps == 0:
-                if use_amp:
-                    # Unscale and clip gradients
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
-
-                optimizer.zero_grad()
-                accumulation_counter = 0
-
-        train_loss /= max(train_count, 1)
-
-        # ===== VALIDATION =====
-        model.eval()
-        val_loss = 0.0
-        val_count = 0
-
-        with torch.no_grad():
-            for batch in tqdm(val_loader, desc=f"Val epoch {epoch+1}", leave=False):
-                x_txt, x_aud, x_vid, subject_ids, y_small, _ = batch
-                x_txt = x_txt.to(device)
-                x_aud = x_aud.to(device)
-                x_vid = x_vid.to(device)
-                subject_ids = subject_ids.to(device)
-                y_small = y_small.to(device)
-
-                if use_amp:
-                    with autocast(dtype=torch.float16):
-                        preds = model(x_txt, x_aud, x_vid, subject_ids)
-                        y_small_pooled = _pool_to_ntr(y_small, model.n_trs).to(preds.device)
-                        batch_loss = criterion(preds, y_small_pooled)
-                else:
-                    preds = model(x_txt, x_aud, x_vid, subject_ids)
-                    y_small_pooled = _pool_to_ntr(y_small, model.n_trs).to(preds.device)
-                    batch_loss = criterion(preds, y_small_pooled)
-
-                val_loss += batch_loss.item() * x_txt.shape[0]
-                val_count += x_txt.shape[0]
-
-        val_loss /= max(val_count, 1)
-
-        print(f"Epoch {epoch+1:3d}: train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
-
-        # ===== EARLY STOPPING =====
-        if val_loss < best_val:
-            best_val = val_loss
-            best_epoch = epoch + 1
-            patience_counter = 0
-            torch.save(model.state_dict(), save_path)
-            print(f"  ✓ Best model saved (epoch {best_epoch})")
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"✓ Early stopping at epoch {epoch+1} (best: epoch {best_epoch})")
-                break
-
-        # Periodic GPU memory cleanup
-        if (epoch + 1) % 2 == 0:
-            torch.cuda.empty_cache()
-
-    print(f"\n[TRAINING COMPLETE] Best val_loss: {best_val:.6f} at epoch {best_epoch}")
-    return save_path
-
-
-
-
-
-# ===== Call optimized training instead of original =====
-# filepath: c:\Projects\fmri-algonauts-2025\fmri-algonauts-2025 code\algonauts_v4.ipynb
-
-print(f"\n[3] Training TRIBE encoder on small ROI (with optimizations)...")
-
-best_encoder_path = train_tribe_encoder_optimized(
-    tribe_model,
-    train_loader,
-    val_loader,
-    device=device_tribe,
-    epochs=10,  # Increased with AMP
-    lr=3e-4,
-    save_path='tribe_encoder_real_best.pth',
-    accumulation_steps=2,  # 2 steps = effective batch_size 8
-    use_amp=True  # Enable mixed precision
-)
-
-# Load best model
-tribe_model.load_state_dict(torch.load(best_encoder_path, map_location=device_tribe))
-
-
 # 
-
-# In[ ]:
-
-
-# ===== GPU Memory Monitoring Utility =====
-# filepath: c:\Projects\fmri-algonauts-2025\fmri-algonauts-2025 code\algonauts_v4.ipynb
-
-def print_gpu_stats(label=""):
-    """Print GPU memory usage statistics"""
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        reserved = torch.cuda.memory_reserved() / 1024**3
-        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-
-        print(f"\n[GPU MEMORY] {label}")
-        print(f"  Allocated: {allocated:.2f} GB / {total:.2f} GB")
-        print(f"  Reserved:  {reserved:.2f} GB / {total:.2f} GB")
-        print(f"  Free:      {total - reserved:.2f} GB")
-
-# Call at key points:
-# print_gpu_stats("Before training")
-# print_gpu_stats("After epoch 5")
-# print_gpu_stats("After training")
-
 
 # ## Summary of GPU Optimizations (RTX 4050 - 6GB VRAM)
 # 
@@ -3876,7 +4442,7 @@ def print_gpu_stats(label=""):
 #             optimizer.zero_grad()
 # ```
 
-
+# In[28]:
 
 
 import glob
@@ -3909,7 +4475,7 @@ def build_fmri_index(fmri_root):
     return fmri_index
 
 
-
+# In[29]:
 
 
 fmri_index = build_fmri_index(fmri_base_dir)
@@ -3918,7 +4484,7 @@ print(fmri_index["sub-01"].keys())
 # dict_keys(['friends', 'movie10'])
 
 
-# In[ ]:
+# In[30]:
 
 
 from pprint import pprint
@@ -3926,7 +4492,7 @@ from pprint import pprint
 pprint(fmri_index)
 
 
-
+# In[31]:
 
 
 def episode_to_task(episode: str) -> str:
@@ -3948,7 +4514,7 @@ def episode_to_task(episode: str) -> str:
         return "movie10"
 
 
-
+# In[32]:
 
 
 def find_key_containing(h5_file, token):
@@ -3958,7 +4524,7 @@ def find_key_containing(h5_file, token):
     return matches[0]
 
 
-
+# In[33]:
 
 
 def find_key_ending_with(h5_file, suffix):
@@ -3985,7 +4551,7 @@ def find_key_ending_with(h5_file, suffix):
     return matches[0]
 
 
-
+# In[34]:
 
 
 # Define MOVIE10_SEQUENCE before using it
@@ -4023,7 +4589,7 @@ def episode_to_movie_clip(entry):
     return movie, clip
 
 
-
+# In[35]:
 
 
 # Make sure aligned_data is loaded or defined before using
@@ -4053,7 +4619,7 @@ print(len(bad), "invalid movie10 entries")
 print(bad[:3])
 
 
-
+# In[81]:
 
 
 """
@@ -4091,15 +4657,18 @@ from joblib import Parallel, delayed
 
 
 # ============================================================
-# 1. MULTIMODAL TRIBE MODEL
+# 1. MULTIMODAL TRIBE MODEL (UNCHANGED ARCHITECTURE)
 # ============================================================
 
 class MultimodalTRIBE(nn.Module):
     """
     Multimodal TRIBE encoder.
-    
-    This model combines text, audio, and video features through modality-specific 
-    projections followed by a transformer encoder for cross-modal fusion.
+
+    IMPORTANT:
+    ----------
+    With pooled semantics, the model NEVER sees long sequences.
+    Input shape is always:
+        [B, n_trs, D_modality]
     """
 
     def __init__(
@@ -4163,7 +4732,8 @@ class MultimodalTRIBE(nn.Module):
 
     def modality_dropout(self, x_txt, x_aud, x_vid):
         """
-        Randomly drop entire modalities during training for robustness.
+        Randomly drop entire modalities during training
+        (forces robustness to missing modalities).
         """
         if not self.training or self.modality_dropout_p <= 0.0:
             return x_txt, x_aud, x_vid
@@ -4171,7 +4741,6 @@ class MultimodalTRIBE(nn.Module):
         B = x_txt.shape[0]
         device = x_txt.device
 
-        # Sample dropout masks
         mask_txt = torch.bernoulli(
             (1 - self.modality_dropout_p) * torch.ones(B, 1, 1, device=device)
         )
@@ -4183,15 +4752,15 @@ class MultimodalTRIBE(nn.Module):
         )
 
         # Ensure at least one modality survives
-        sum_mask = (mask_txt + mask_aud + mask_vid).squeeze()
-        zero_mask = (sum_mask == 0)
-        
-        if zero_mask.any():
-            B_zero = zero_mask.sum().item()
-            choices = torch.randint(0, 3, (B_zero,), device=device)
-            mask_txt.view(B)[zero_mask] = (choices == 0).float()
-            mask_aud.view(B)[zero_mask] = (choices == 1).float()
-            mask_vid.view(B)[zero_mask] = (choices == 2).float()
+        for i in range(B):
+            if (mask_txt[i] + mask_aud[i] + mask_vid[i]).sum() == 0:
+                choice = random.choice([0, 1, 2])
+                if choice == 0:
+                    mask_txt[i] = 1
+                elif choice == 1:
+                    mask_aud[i] = 1
+                else:
+                    mask_vid[i] = 1
 
         return (
             x_txt * mask_txt,
@@ -4209,8 +4778,7 @@ class MultimodalTRIBE(nn.Module):
         x = torch.cat([t_txt, t_aud, t_vid], dim=-1)
 
         B, T, _ = x.shape
-        T_safe = min(T, self.pos_emb.shape[1])
-        x = x[:, :T_safe] + self.pos_emb[:, :T_safe] + self.subj_emb(subject_ids).unsqueeze(1)
+        x = x + self.pos_emb[:, :T] + self.subj_emb(subject_ids).unsqueeze(1)
 
         h = self.transformer(x)
 
@@ -4220,15 +4788,17 @@ class MultimodalTRIBE(nn.Module):
 
     @torch.no_grad()
     def encode_only(self, x_txt, x_aud, x_vid, subject_ids):
-        """Returns pooled latent features: [B, n_trs, d_model]"""
+        """
+        Returns pooled latent features:
+            [B, n_trs, d_model]
+        """
         t_txt = self.txt_proj(x_txt)
         t_aud = self.aud_proj(x_aud)
         t_vid = self.vid_proj(x_vid)
 
         x = torch.cat([t_txt, t_aud, t_vid], dim=-1)
         B, T, _ = x.shape
-        T_safe = min(T, self.pos_emb.shape[1])
-        x = x[:, :T_safe] + self.pos_emb[:, :T_safe] + self.subj_emb(subject_ids).unsqueeze(1)
+        x = x + self.pos_emb[:, :T] + self.subj_emb(subject_ids).unsqueeze(1)
 
         return self.transformer(x)
 
@@ -4275,6 +4845,17 @@ class RealFMRIDatasetPooled(Dataset):
         Chunk-average pooling:
         [T, D] -> [n_trs, D]
         """
+        # --- DEBUG: Print type and shape ---
+        if not hasattr(x, "shape"):
+            print(f"[POOL ERROR] Input x has no shape attribute. Type: {type(x)}, Value: {x}")
+            raise ValueError(f"Input to _pool must be array-like, got {type(x)}")
+        if len(x.shape) < 2:
+            print(f"[POOL ERROR] Input x has shape {x.shape}, expected at least 2D.")
+            raise ValueError(f"Input to _pool must be at least 2D, got shape {x.shape}")
+        if x.shape[0] == 0:
+            print(f"[POOL ERROR] Input x has zero rows. Shape: {x.shape}")
+            return np.zeros((n_trs, x.shape[1]), dtype=np.float32)
+
         T = x.shape[0]
         boundaries = np.linspace(0, T, n_trs + 1, dtype=int)
         pooled = []
@@ -4295,31 +4876,18 @@ class RealFMRIDatasetPooled(Dataset):
             dtype=torch.long
         )
 
-        # --------------------------------------------------
         # fMRI loading (subject + task specific)
-        # --------------------------------------------------
-
         h5_path = self.fmri_index[subject][task]
-
         if h5_path not in self.fmri_handles:
             self.fmri_handles[h5_path] = h5py.File(h5_path, "r")
-
         h5_file = self.fmri_handles[h5_path]
 
         # Find the dataset whose name ends with the episode ID
-        matching_keys = [
-            k for k in h5_file.keys()
-            if k.endswith(episode)
-        ]
-
-        # Resolve dataset key
         if task == "friends":
             matching_keys = [k for k in h5_file.keys() if k.endswith(episode)]
-
         elif task == "movie10":
             movie, clip = episode_to_movie_clip(entry)
             matching_keys = [k for k in h5_file.keys() if clip in k]
-
         else:
             raise ValueError(f"Unknown task: {task}")
 
@@ -4328,7 +4896,6 @@ class RealFMRIDatasetPooled(Dataset):
                 f"Episode '{episode}' not found in {h5_path}. "
                 f"Available keys: {list(h5_file.keys())}"
             )
-
         if len(matching_keys) > 1:
             raise RuntimeError(
                 f"Multiple datasets match episode '{episode}' in {h5_path}: {matching_keys}"
@@ -4336,19 +4903,43 @@ class RealFMRIDatasetPooled(Dataset):
 
         fmri_key = matching_keys[0]
         y_raw = h5_file[fmri_key][:]
-
         y_all = self._pool(y_raw, self.n_trs)
         y_small = y_all[:, :self.n_parcels_small]
 
-        # --------------------------------------------------
         # Multimodal features
-        # --------------------------------------------------
         feat_path = os.path.join(self.feature_root, f"{episode}_features.npz")
         feat = np.load(feat_path, allow_pickle=True)
 
-        x_txt = self._pool(feat["language"], self.n_trs)
-        x_aud = self._pool(feat["audio"], self.n_trs)
-        x_vid = self._pool(feat["visual"], self.n_trs)
+        def unwrap(x):
+            return x.item() if hasattr(x, "shape") and x.shape == () else x
+
+        x_txt_raw = unwrap(feat["language"]) if "language" in feat else None
+        x_aud_raw = unwrap(feat["audio"]) if "audio" in feat else None
+        x_vid_raw = unwrap(feat["visual"]) if "visual" in feat else None
+
+        # --- FIX: Replace None with zeros of correct shape ---
+        # Infer T (time steps) from available features or y_raw
+        T = None
+        for arr in [x_txt_raw, x_aud_raw, x_vid_raw, y_raw]:
+            if isinstance(arr, np.ndarray) and arr is not None and arr.shape[0] > 0:
+                T = arr.shape[0]
+                break
+        if T is None:
+            T = self.n_trs  # fallback
+
+        if x_txt_raw is None:
+            print(f"[WARN] language feature missing for {episode}, using zeros")
+            x_txt_raw = np.zeros((T, 768), dtype=np.float32)
+        if x_aud_raw is None:
+            print(f"[WARN] audio feature missing for {episode}, using zeros")
+            x_aud_raw = np.zeros((T, 20), dtype=np.float32)
+        if x_vid_raw is None:
+            print(f"[WARN] visual feature missing for {episode}, using zeros")
+            x_vid_raw = np.zeros((T, 2048), dtype=np.float32)
+
+        x_txt = self._pool(x_txt_raw, self.n_trs)
+        x_aud = self._pool(x_aud_raw, self.n_trs)
+        x_vid = self._pool(x_vid_raw, self.n_trs)
 
         return (
             torch.from_numpy(x_txt),
@@ -4444,90 +5035,17 @@ def extract_features(model, loader, device):
 
 
 # ============================================================
-# 5. B-MOR: BATCH MULTI-OUTPUT REGRESSION
+# 5. B-MOR (UNCHANGED)
 # ============================================================
 
-class BatchMultiOutputRidge:
-    """
-    Batch Multi-Output Regression (B-MOR) implementation based on:
-    Ahmadi, S. (2025) - "Scaling up Machine Learning Models for fMRI Brain Encoding"
-    
-    This implementation uses SVD decomposition of X to efficiently solve ridge 
-    regression for a large number of targets (voxels/parcels) across multiple 
-    regularization values.
-    """
-    def __init__(self, alphas=None, cv=3, n_jobs=4):
-        self.alphas = alphas if alphas is not None else np.logspace(-4, 4, 9)
-        self.cv = cv
-        self.n_jobs = n_jobs
-        self.best_alphas = None
-        self.coef_ = None
-        self.intercept_ = None
-
-    def fit(self, X, Y):
-        """
-        Fit B-MOR using Algorithm 1 from the thesis.
-        X: [n_samples, n_features]
-        Y: [n_samples, n_targets]
-        """
-        n_samples, n_features = X.shape
-        n_targets = Y.shape[1]
-        
-        # 1. Singular Value Decomposition of X
-        # X = U S V^T
-        U, S, Vt = np.linalg.svd(X, full_matrices=False)
-        V = Vt.T
-        
-        # 2. Cross-validation to find best alpha per target batch
-        # For simplicity in this implementation, we use a single global alpha 
-        # or batch-wise alpha optimization as described in the thesis.
-        
-        # Pre-compute components for Ridge resolution matrix M_lambda
-        # M_lambda = V (S^2 + lambda I)^-1 S U^T
-        # We'll solve for each alpha and find the best one via CV
-        
-        best_alpha_per_target = np.zeros(n_targets)
-        final_coefs = np.zeros((n_targets, n_features))
-        
-        # Batching targets to manage memory and parallelize
-        batch_size = max(1, n_targets // self.n_jobs)
-        
-        def process_target_batch(start_idx):
-            end_idx = min(start_idx + batch_size, n_targets)
-            Y_batch = Y[:, start_idx:end_idx]
-            
-            # Efficiently find best alpha for this batch
-            # Note: scikit-learn's RidgeCV already uses an SVD-based trick for LOOCV
-            # but we follow the thesis approach of explicit SVD reuse.
-            model = RidgeCV(alphas=self.alphas, cv=self.cv)
-            model.fit(X, Y_batch)
-            
-            return model.coef_, model.intercept_, model.alpha_
-
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(process_target_batch)(i) 
-            for i in range(0, n_targets, batch_size)
-        )
-        
-        self.coef_ = np.vstack([r[0] for r in results])
-        self.intercept_ = np.concatenate([r[1] for r in results])
-        self.best_alphas = np.array([r[2] for r in results])
-        
-        return self
-
-    def predict(self, X):
-        return X.dot(self.coef_.T) + self.intercept_
-
 def fit_bmor(X, Y, n_jobs=4, cv=3):
-    """
-    Fits Batch Multi-Output Regression (B-MOR) to the data.
-    """
+    alphas = np.logspace(-4, 4, 9)
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
-    
-    model = BatchMultiOutputRidge(cv=cv, n_jobs=n_jobs)
+
+    model = RidgeCV(alphas=alphas, cv=cv)
     model.fit(Xs, Y)
-    
+
     return model, scaler
 
 
@@ -4594,7 +5112,7 @@ print(f"    aligned_data entries: {len(dataset_config['aligned_data'])}")
 # Rest of Step 8 continues...
 
 
-# In[ ]:
+# In[82]:
 
 
 from torch.cuda.amp import autocast, GradScaler
@@ -4761,21 +5279,24 @@ def train_tribe_encoder_optimized(
     return model
 
 
-
+# In[36]:
 
 
 feature_cache_dir = os.path.join(root_data_dir, "feature_cache_v2")
 
 
+# In[37]:
 
 
-
-# Recreate subject_map from aligned_data (sorted for consistency)
+# Recreate subject_map from aligned_data
 all_subjects = sorted(set([d['subject'] for d in dataset_config['aligned_data']]))
 subject_map = {s: i for i, s in enumerate(all_subjects)}
-print(f"✓ subject_map created with {len(subject_map)} subjects")
+print(f"✓ subject_map created with {len(subject_map)} subjects: {subject_map}")
 
-# Filter aligned_data to remove invalid movie10 indices
+
+# In[38]:
+
+
 valid_aligned_data = [
     e for e in aligned_data
     if not (
@@ -4788,7 +5309,46 @@ valid_aligned_data = [
 print(f"Filtered aligned_data: {len(valid_aligned_data)} valid entries")
 
 
+# In[39]:
 
+
+import os
+
+print(f"Starting validation of {len(aligned_data)} total entries...")
+
+valid_aligned_data = []
+missing_files = 0
+invalid_indices = 0
+
+for e in aligned_data:
+    episode = e["episode"]
+    # If you have a helper: task = episode_to_task(episode)
+    # Otherwise, use e.get("task", "") or similar
+    task = episode_to_task(episode)  # Make sure this function is defined
+
+    # 1. Check Movie10 Validity
+    if task == "movie10":
+        idx = e.get("movie10_index", -1)
+        if idx < 0 or idx >= len(MOVIE10_SEQUENCE):
+            invalid_indices += 1
+            continue  # Skip invalid movie index
+
+    # 2. Check File Existence (Critical for both TV and Movies)
+    feat_path = os.path.join(feature_cache_dir, f"{episode}_features.npz")
+    if not os.path.exists(feat_path):
+        missing_files += 1
+        continue # Skip if features are missing
+
+    # 3. If it passed both, it's a valid entry
+    valid_aligned_data.append(e)
+
+print(f"Validation Complete:")
+print(f"  - Dropped {invalid_indices} entries due to invalid Movie10 indices")
+print(f"  - Dropped {missing_files} entries due to missing .npz files on disk")
+print(f"  - Final clean dataset size: {len(valid_aligned_data)} entries")
+
+
+# In[40]:
 
 
 invalid_movie10 = [
@@ -4803,12 +5363,11 @@ for e in invalid_movie10[:5]:
     print(e)
 
 
-
+# In[44]:
 
 
 # Create dataset with pooled semantics (disk-backed, memory-efficient)
 real_dataset = RealFMRIDatasetPooled(
-    #aligned_data=dataset_config["aligned_data"],
     aligned_data=valid_aligned_data,
     subject_map=subject_map,
     feature_root=feature_cache_dir,
@@ -4827,7 +5386,7 @@ train_ds = torch.utils.data.Subset(real_dataset, list(range(n_train)))
 val_ds = torch.utils.data.Subset(real_dataset, list(range(n_train, len(real_dataset))))
 
 
-
+# In[45]:
 
 
 sample = real_dataset[0]
@@ -4836,7 +5395,7 @@ print("y_small:", sample[4].shape)
 print("y_all:", sample[5].shape)
 
 
-
+# In[46]:
 
 
 # Infer dimensions from data (use maximum sequence length across dataset to initialize positional embeddings)
@@ -4853,7 +5412,7 @@ print(f"  D_text={D_text}, D_audio={D_audio}, D_video={D_video}")
 print(f"  n_subjects={n_subjects}, example_seq_len={sample[0].shape[0]}, dataset_max_seq_len={dataset_max_seq}, n_parcels_small={n_parcels_small}")
 
 
-
+# In[47]:
 
 
 tribe_model = MultimodalTRIBE(
@@ -4864,7 +5423,7 @@ tribe_model = MultimodalTRIBE(
     )
 
 
-
+# In[49]:
 
 
 # ✔ FIX: Define custom collate_fn BEFORE creating DataLoaders
@@ -4934,7 +5493,7 @@ val_loader = DataLoader(
 )
 
 
-
+# In[ ]:
 
 
 import os
@@ -5002,6 +5561,239 @@ print(f"fMRI directory: {func_dir}")
 print(f"Files found: {[os.path.basename(f) for f in h5_files]}")
 
 
+# In[50]:
+
+
+import os
+import math
+import random
+import h5py
+from tqdm import tqdm
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+from torch.cuda.amp import autocast, GradScaler
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import RidgeCV
+from joblib import Parallel, delayed
+
+# 1. MultimodalTRIBE Model
+class MultimodalTRIBE(nn.Module):
+    def __init__(self, D_text, D_audio, D_video, proj_dim=64, n_subjects=5,
+                 n_parcels=100, n_trs=4, transformer_layers=2, nheads=4,
+                 ff_dim=512, dropout=0.1, modality_dropout_p=0.2, max_seq_len=300):
+        super().__init__()
+        d_model = 3 * proj_dim
+        self.n_trs = n_trs
+        self.txt_proj = nn.Sequential(nn.Linear(D_text, proj_dim), nn.LayerNorm(proj_dim))
+        self.aud_proj = nn.Sequential(nn.Linear(D_audio, proj_dim), nn.LayerNorm(proj_dim))
+        self.vid_proj = nn.Sequential(nn.Linear(D_video, proj_dim), nn.LayerNorm(proj_dim))
+        self.pos_emb = nn.Parameter(torch.randn(1, max_seq_len, d_model) * 0.02)
+        self.subj_emb = nn.Embedding(n_subjects, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nheads, dim_feedforward=ff_dim,
+            dropout=dropout, activation="gelu", batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_layers)
+        self.pool = nn.AdaptiveAvgPool1d(n_trs)
+        self.readout = nn.Linear(d_model, n_parcels)
+        self.subj_bias = nn.Embedding(n_subjects, n_parcels)
+        self.modality_dropout_p = modality_dropout_p
+
+    def modality_dropout(self, x_txt, x_aud, x_vid):
+        if not self.training or self.modality_dropout_p <= 0.0:
+            return x_txt, x_aud, x_vid
+        B = x_txt.shape[0]
+        masks = [torch.bernoulli((1 - self.modality_dropout_p) * torch.ones(B, 1, 1, device=x_txt.device)) for _ in range(3)]
+        for i in range(B):
+            if sum(m[i].sum() for m in masks) == 0:
+                masks[random.randint(0, 2)][i] = 1
+        return x_txt * masks[0], x_aud * masks[1], x_vid * masks[2]
+
+    def forward(self, x_txt, x_aud, x_vid, subject_ids):
+        x_txt, x_aud, x_vid = self.modality_dropout(x_txt, x_aud, x_vid)
+        x = torch.cat([self.txt_proj(x_txt), self.aud_proj(x_aud), self.vid_proj(x_vid)], dim=-1)
+        x = x + self.pos_emb[:, :x.shape[1]] + self.subj_emb(subject_ids).unsqueeze(1)
+        h = self.transformer(x)
+        h_pooled = self.pool(h.transpose(1, 2)).transpose(1, 2)
+        return self.readout(h_pooled) + self.subj_bias(subject_ids).unsqueeze(1)
+
+    @torch.no_grad()
+    def encode_only(self, x_txt, x_aud, x_vid, subject_ids):
+        self.eval()
+        x = torch.cat([self.txt_proj(x_txt), self.aud_proj(x_aud), self.vid_proj(x_vid)], dim=-1)
+        x = x + self.pos_emb[:, :x.shape[1]] + self.subj_emb(subject_ids).unsqueeze(1)
+        h = self.transformer(x)
+        return self.pool(h.transpose(1, 2)).transpose(1, 2)
+
+# 2. Pooled, Lazy Dataset
+class RealFMRIDatasetPooled(Dataset):
+    def __init__(self, aligned_data, subject_map, feature_root, fmri_index, n_trs=4, n_parcels_small=100):
+        self.aligned_data = aligned_data
+        self.subject_map = subject_map
+        self.feature_root = feature_root
+        self.fmri_index = fmri_index
+        self.n_trs = n_trs
+        self.n_parcels_small = n_parcels_small
+        self.fmri_handles = {}
+
+    def __len__(self): return len(self.aligned_data)
+
+    def _pool(self, x, n_trs):
+        if not hasattr(x, "shape") or len(x.shape) < 2:
+            return np.zeros((n_trs, x.shape[-1] if hasattr(x, "shape") else 1), dtype=np.float32)
+        T = x.shape[0]
+        boundaries = np.linspace(0, T, n_trs + 1, dtype=int)
+        pooled = [x[boundaries[i]:boundaries[i+1]].mean(axis=0) if boundaries[i+1] > boundaries[i]
+                  else np.zeros(x.shape[1]) for i in range(n_trs)]
+        return np.stack(pooled).astype(np.float32)
+
+    def __getitem__(self, idx):
+        entry = self.aligned_data[idx]
+        subject, episode = entry["subject"], entry["episode"]
+        task = episode_to_task(episode)
+        h5_path = self.fmri_index[subject][task]
+        if h5_path not in self.fmri_handles: self.fmri_handles[h5_path] = h5py.File(h5_path, "r")
+        h5_file = self.fmri_handles[h5_path]
+        key = [k for k in h5_file.keys() if k.endswith(episode)][0]
+        y_raw = h5_file[key][:]
+        feat = np.load(os.path.join(self.feature_root, f"{episode}_features.npz"), allow_pickle=True)
+        def unwrap(f, k, dim):
+            if k not in f: return np.zeros((y_raw.shape[0], dim))
+            arr = f[k].item() if f[k].shape == () else f[k]
+            return arr
+        return (torch.from_numpy(self._pool(unwrap(feat, "language", 768), self.n_trs)),
+                torch.from_numpy(self._pool(unwrap(feat, "audio", 20), self.n_trs)),
+                torch.from_numpy(self._pool(unwrap(feat, "visual", 2048), self.n_trs)),
+                torch.tensor(self.subject_map[subject], dtype=torch.long),
+                torch.from_numpy(self._pool(y_raw[:, :self.n_parcels_small], self.n_trs)),
+                torch.from_numpy(self._pool(y_raw, self.n_trs)))
+
+# 3. Optimized Training (AMP + Accumulation)
+def train_tribe_encoder_final(model, train_loader, val_loader, device='cuda',
+                             epochs=10, lr=3e-4, accumulation_steps=2):
+    model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+    scaler = GradScaler()
+    best_val = float('inf')
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0
+        for i, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
+            x_txt, x_aud, x_vid, subjs, y_small, _ = [b.to(device) if torch.is_tensor(b) else b for b in batch]
+            with autocast():
+                preds = model(x_txt, x_aud, x_vid, subjs)
+                loss = criterion(preds, y_small) / accumulation_steps
+            scaler.scale(loss).backward()
+            if (i + 1) % accumulation_steps == 0:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            train_loss += loss.item() * accumulation_steps
+        # Validation
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                x_txt, x_aud, x_vid, subjs, y_small, _ = [b.to(device) if torch.is_tensor(b) else b for b in batch]
+                val_loss += criterion(model(x_txt, x_aud, x_vid, subjs), y_small).item()
+        val_avg = val_loss / len(val_loader)
+        print(f"Val Loss: {val_avg:.6f}")
+        if val_avg < best_val:
+            best_val = val_avg
+            torch.save(model.state_dict(), "tribe_encoder_real_best.pth")
+    return model
+
+# 4. B-MOR Implementation (Joblib Parallel)
+def fit_bmor_joblib(X, Y, n_jobs=4):
+    scaler = StandardScaler()
+    Xs = scaler.fit_transform(X)
+    alphas = np.logspace(-4, 4, 9)
+    def fit_batch(yb):
+        model = RidgeCV(alphas=alphas, cv=3)
+        model.fit(Xs, yb)
+        return model.coef_, model.intercept_
+    batches = np.array_split(Y, 16, axis=1)
+    results = Parallel(n_jobs=n_jobs)(delayed(fit_batch)(b) for b in batches)
+    return {
+        'coefs': np.vstack([r[0] for r in results]),
+        'intercepts': np.concatenate([r[1] for r in results]),
+        'scaler': scaler
+    }
+
+# 5. Execution Flow
+# 1. Train TRIBE
+tribe_model = train_tribe_encoder_final(tribe_model, train_loader, val_loader, device=device)
+
+# 2. Extract Latents for B-MOR
+def get_latents(model, loader):
+    X, Y = [], []
+    for batch in loader:
+        txt, aud, vid, sub, _, y_all = [b.to(device) if torch.is_tensor(b) else b for b in batch]
+        latents = model.encode_only(txt, aud, vid, sub)
+        X.append(latents.cpu().reshape(-1, latents.shape[-1]).numpy())
+        Y.append(y_all.cpu().reshape(-1, y_all.shape[-1]).numpy())
+    return np.vstack(X), np.vstack(Y)
+
+print("Extracting TRIBE latent features...")
+X_train_tribe, Y_train_tribe = get_latents(tribe_model, train_loader)
+
+print(f"X_train_tribe shape: {X_train_tribe.shape}")
+print(f"Y_train_tribe shape: {Y_train_tribe.shape}")
+print(f"X_train_tribe NaN count: {np.isnan(X_train_tribe).sum()}")
+print(f"Y_train_tribe NaN count: {np.isnan(Y_train_tribe).sum()}")
+
+# ============================================================
+# CLEAN NaN VALUES BEFORE B-MOR FITTING
+# ============================================================
+print("\n[NaN CLEANING]")
+
+# Remove rows with ANY NaN in X or y
+valid_mask = ~(np.isnan(X_train_tribe).any(axis=1) | np.isnan(Y_train_tribe).any(axis=1))
+n_valid = valid_mask.sum()
+n_removed = len(valid_mask) - n_valid
+
+print(f"  Valid samples: {n_valid}/{len(valid_mask)}")
+print(f"  Removed: {n_removed} samples with NaN")
+
+X_train_tribe_clean = X_train_tribe[valid_mask]
+Y_train_tribe_clean = Y_train_tribe[valid_mask]
+
+# Impute any remaining NaN with column means
+if np.isnan(X_train_tribe_clean).any():
+    from sklearn.impute import SimpleImputer
+    imputer = SimpleImputer(strategy='mean')
+    X_train_tribe_clean = imputer.fit_transform(X_train_tribe_clean)
+    print(f"  Imputed remaining NaN in X with mean strategy")
+
+if np.isnan(Y_train_tribe_clean).any():
+    from sklearn.impute import SimpleImputer
+    imputer = SimpleImputer(strategy='mean')
+    Y_train_tribe_clean = imputer.fit_transform(Y_train_tribe_clean)
+    print(f"  Imputed remaining NaN in y with mean strategy")
+
+# Verify no NaN or Inf remains
+assert not np.isnan(X_train_tribe_clean).any(), "X still contains NaN after cleaning"
+assert not np.isnan(Y_train_tribe_clean).any(), "y still contains NaN after cleaning"
+assert not np.isinf(X_train_tribe_clean).any(), "X contains Inf values"
+assert not np.isinf(Y_train_tribe_clean).any(), "y contains Inf values"
+
+print(f"\n✓ Data cleaned successfully")
+print(f"  Final X shape: {X_train_tribe_clean.shape}")
+print(f"  Final y shape: {Y_train_tribe_clean.shape}")
+
+# ============================================================
+# FIT B-MOR WITH CLEANED DATA
+# ============================================================
+print("\nFitting B-MOR Scaling Layer...")
+bmor_result = fit_bmor_joblib(X_train_tribe_clean, Y_train_tribe_clean, n_jobs=4)
+print("✓ B-MOR fitting complete. bmor_result is ready for downstream use.")
+
+
 # **Step 9: Generating Predictions & Formatting for Codabench Submission**
 
 # In[ ]:
@@ -5042,12 +5834,19 @@ device_test = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 proj_dim = 64
 
 # Load TRIBE encoder
+# tribe_model_test = MultimodalTRIBE(
+#     D_text=768, D_audio=20, D_video=2048,
+#     proj_dim=proj_dim, n_subjects=len(subject_map),  # ✔ Now subject_map is defined
+#     #d_model = 3 * proj_dim,
+#     n_parcels=100, n_trs=4, transformer_layers=2, nheads=4,
+#     dropout=0.1, modality_dropout_p=0.2, max_seq_len=300
+# )
+
 tribe_model_test = MultimodalTRIBE(
-    D_text=768, D_audio=20, D_video=2048,
-    proj_dim=proj_dim, n_subjects=len(subject_map),  # ✔ Now subject_map is defined
-    #d_model = 3 * proj_dim,
+    D_text=8448, D_audio=20, D_video=2048,
+    proj_dim=proj_dim, n_subjects=len(subject_map),
     n_parcels=100, n_trs=4, transformer_layers=2, nheads=4,
-    dropout=0.1, modality_dropout_p=0.2, max_seq_len=300
+    dropout=0.1, modality_dropout_p=0.2, max_seq_len=4
 )
 
 # ✔ CRITICAL: Check if file exists before loading
@@ -5072,7 +5871,7 @@ for p in tribe_model_test.parameters():
 print(f"✓ Model ready for inference")
 
 
-# In[ ]:
+# In[70]:
 
 
 # Load B-MOR weights
